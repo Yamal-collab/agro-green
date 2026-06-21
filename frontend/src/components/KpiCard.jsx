@@ -1,10 +1,18 @@
 import React from "react";
 
+const ACCENT_COLORS = {
+  water: "#0284C7",
+  warn: "#CA8A04",
+  danger: "#C2410C",
+  success: "#15803D",
+};
+
+function resolveColor(accent) {
+  return ACCENT_COLORS[accent] || "var(--agri-primary)";
+}
+
 export default function KpiCard({ label, value, hint, accent, testid }) {
-  const color = accent === "water" ? "#0284C7"
-    : accent === "warn" ? "#CA8A04"
-    : accent === "danger" ? "#C2410C"
-    : "var(--agri-primary)";
+  const color = resolveColor(accent);
   return (
     <div
       data-testid={testid}

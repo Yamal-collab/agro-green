@@ -4,6 +4,7 @@ import api, { formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Plus, X, Package, AlertTriangle } from "lucide-react";
 import { Field, SelectField } from "@/pages/Poultry";
+import { stockMoveBadge } from "@/lib/badges";
 
 export default function Inventory() {
   const qc = useQueryClient();
@@ -105,9 +106,7 @@ export default function Inventory() {
                 <tr key={m.id} className="border-t border-border">
                   <td className="py-3 px-4 text-xs">{m.ts?.slice(0, 16).replace("T", " ")}</td>
                   <td>{item?.name || "—"}</td>
-                  <td><span className={`uppercase text-[10px] font-semibold px-2 py-0.5 rounded ${
-                    m.type === "in" ? "bg-[#15803D]/10 text-[#15803D]" : m.type === "out" ? "bg-[#C2410C]/10 text-[#C2410C]" : "bg-secondary text-primary"
-                  }`}>{m.type}</span></td>
+                  <td><span className={`uppercase text-[10px] font-semibold px-2 py-0.5 rounded ${stockMoveBadge(m.type)}`}>{m.type}</span></td>
                   <td className="text-right">{m.quantity}</td>
                   <td className="text-right text-muted-foreground">{m.prev_stock}</td>
                   <td className="text-right px-4 font-semibold">{m.new_stock}</td>

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import api from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
@@ -7,6 +7,9 @@ import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianG
 import { AlertTriangle, TrendingUp, Egg, Droplets } from "lucide-react";
 
 const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
+const AXIS_TICK = { fontSize: 11 };
+const LINE_DOT = { r: 3 };
+const SKELETON_KEYS = ["s1", "s2", "s3", "s4"];
 
 export default function Dashboard() {
   const { data, isLoading } = useQuery({
@@ -19,7 +22,7 @@ export default function Dashboard() {
       <div data-testid="dashboard-loading" className="space-y-4">
         <div className="h-8 w-48 bg-secondary rounded animate-pulse" />
         <div className="grid grid-cols-4 gap-4">
-          {[...Array(4)].map((_, i) => <div key={i} className="h-28 bg-secondary rounded animate-pulse" />)}
+          {SKELETON_KEYS.map((k) => <div key={k} className="h-28 bg-secondary rounded animate-pulse" />)}
         </div>
       </div>
     );
@@ -61,10 +64,10 @@ export default function Dashboard() {
           <ResponsiveContainer width="100%" height={220}>
             <LineChart data={data.revenue_trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#94a3b8" />
-              <YAxis tick={{ fontSize: 11 }} stroke="#94a3b8" />
+              <XAxis dataKey="date" tick={AXIS_TICK} stroke="#94a3b8" />
+              <YAxis tick={AXIS_TICK} stroke="#94a3b8" />
               <Tooltip />
-              <Line type="monotone" dataKey="revenue" stroke="#14532D" strokeWidth={2.5} dot={{ r: 3 }} />
+              <Line type="monotone" dataKey="revenue" stroke="#14532D" strokeWidth={2.5} dot={LINE_DOT} />
             </LineChart>
           </ResponsiveContainer>
         </div>

@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api, { formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Plus, X, Egg } from "lucide-react";
+import { paymentStatusBadge, mortalityColor } from "@/lib/badges";
 
 const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
 
@@ -119,7 +120,7 @@ export default function Poultry() {
                 <div className="w-full h-1.5 bg-secondary rounded-full overflow-hidden">
                   <div className="h-full transition-all" style={{
                     width: `${Math.min(100, mort)}%`,
-                    backgroundColor: mort > 10 ? "#C2410C" : mort > 5 ? "#CA8A04" : "#15803D"
+                    backgroundColor: mortalityColor(mort)
                   }} />
                 </div>
               </div>
@@ -153,11 +154,7 @@ export default function Poultry() {
                   <td className="text-right">{s.quantity}</td>
                   <td className="text-right font-semibold">{currency(s.total)}</td>
                   <td className="text-right px-4">
-                    <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-semibold ${
-                      s.payment_status === "paid" ? "bg-[#15803D]/10 text-[#15803D]" :
-                      s.payment_status === "partial" ? "bg-[#CA8A04]/10 text-[#CA8A04]" :
-                      "bg-[#C2410C]/10 text-[#C2410C]"
-                    }`}>{s.payment_status}</span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-semibold ${paymentStatusBadge(s.payment_status)}`}>{s.payment_status}</span>
                   </td>
                 </tr>
               ))}

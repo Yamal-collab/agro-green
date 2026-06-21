@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api, { formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
@@ -8,6 +8,7 @@ import { Field, SelectField } from "@/pages/Poultry";
 
 const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
 const COLORS = ["#14532D", "#0284C7", "#CA8A04", "#C2410C", "#15803D", "#475569"];
+const LEGEND_STYLE = { fontSize: 11 };
 
 export default function Finance() {
   const qc = useQueryClient();
@@ -88,10 +89,10 @@ export default function Finance() {
             <ResponsiveContainer width="100%" height={220}>
               <PieChart>
                 <Pie data={expenseData} dataKey="value" nameKey="name" outerRadius={80} label>
-                  {expenseData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                  {expenseData.map((entry) => <Cell key={entry.name} fill={COLORS[expenseData.indexOf(entry) % COLORS.length]} />)}
                 </Pie>
                 <Tooltip />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Legend wrapperStyle={LEGEND_STYLE} />
               </PieChart>
             </ResponsiveContainer>
           )}
@@ -144,8 +145,7 @@ export default function Finance() {
                 <td className="py-3 px-4 text-xs">{t.date}</td>
                 <td><span className={`uppercase text-[10px] font-semibold px-2 py-0.5 rounded ${
                   t.type === "income" ? "bg-[#15803D]/10 text-[#15803D]" : "bg-[#C2410C]/10 text-[#C2410C]"
-                }`}>{t.type}</span></td>
-                <td className="capitalize">{t.category}</td>
+                }`}>{t.type}</span></td>                <td className="capitalize">{t.category}</td>
                 <td className="capitalize text-muted-foreground text-xs">{t.source}</td>
                 <td className="text-muted-foreground text-xs">{t.notes || "—"}</td>
                 <td className={`text-right px-4 font-semibold ${t.type === "income" ? "text-[#15803D]" : "text-[#C2410C]"}`}>

@@ -4,6 +4,7 @@ import api, { formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import { Plus, X, Droplet, Truck } from "lucide-react";
 import { Field, SelectField } from "@/pages/Poultry";
+import { paymentStatusBadge, lorryStatusBadge } from "@/lib/badges";
 
 const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
 
@@ -139,11 +140,7 @@ export default function Water() {
                   <Truck className="h-5 w-5" style={{ color: "#0284C7" }} />
                   <div className="font-bold text-lg font-mono">{l.registration_no}</div>
                 </div>
-                <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded font-semibold ${
-                  l.status === "transit" ? "bg-[#CA8A04]/10 text-[#CA8A04]" :
-                  l.status === "maintenance" ? "bg-[#C2410C]/10 text-[#C2410C]" :
-                  "bg-secondary text-primary"
-                }`}>{l.status}</span>
+                <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded font-semibold ${lorryStatusBadge(l.status)}`}>{l.status}</span>
               </div>
               <div className="text-sm space-y-1">
                 <div><span className="text-muted-foreground">Capacity:</span> <span className="font-semibold">{l.capacity} L</span></div>
@@ -180,11 +177,7 @@ export default function Water() {
                   <td className="text-right">{currency(s.rate)}</td>
                   <td className="text-right font-semibold">{currency(s.total)}</td>
                   <td className="text-right px-4">
-                    <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-semibold ${
-                      s.payment_status === "paid" ? "bg-[#15803D]/10 text-[#15803D]" :
-                      s.payment_status === "partial" ? "bg-[#CA8A04]/10 text-[#CA8A04]" :
-                      "bg-[#C2410C]/10 text-[#C2410C]"
-                    }`}>{s.payment_status}</span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-semibold ${paymentStatusBadge(s.payment_status)}`}>{s.payment_status}</span>
                   </td>
                 </tr>
               ))}
