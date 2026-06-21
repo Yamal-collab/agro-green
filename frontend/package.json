@@ -92,7 +92,8 @@
     "eslint-plugin-react-hooks": "5.2.0",
     "globals": "15.15.0",
     "postcss": "8.5.10",
-    "tailwindcss": "3.4.17"
+    "tailwindcss": "3.4.17",
+    "webpack-dev-server": "4.15.2"
   },
   "resolutions": {
     "react-router": "7.15.0",
@@ -120,6 +121,9 @@
     "**/jsdom/form-data": "3.0.4",
     "**/postcss-svgo/svgo": "2.8.1",
     "**/webpack-dev-server/ws": "8.20.1",
+    "webpack-dev-server": "4.15.2",
+    "**/webpack-dev-server": "4.15.2",
+    "react-scripts/webpack-dev-server": "4.15.2",
     "**/postcss-load-config/yaml": "2.8.3",
     "**/cosmiconfig/yaml": "1.10.3",
     "**/cssnano/yaml": "1.10.3",
