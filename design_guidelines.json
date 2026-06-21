@@ -1,0 +1,127 @@
+{
+  "theme": "light",
+  "archetype": "1_organic_earthy",
+  "tone": "Modern Agritech Operations Console, Professional, Grounded, Efficient",
+  "colors": {
+    "background": "#F4F5F2",
+    "surface": "#FFFFFF",
+    "primary": "#14532D",
+    "primary_hover": "#166534",
+    "secondary": "#EAF0EA",
+    "text_primary": "#0F172A",
+    "text_secondary": "#475569",
+    "border": "#E2E8F0",
+    "accent_warning": "#CA8A04",
+    "accent_danger": "#C2410C",
+    "accent_water": "#0284C7",
+    "accent_success": "#15803D"
+  },
+  "typography": {
+    "heading_font": "Cabinet Grotesk, sans-serif",
+    "body_font": "Manrope, sans-serif",
+    "h1": "text-4xl tracking-tight font-bold",
+    "h2": "text-2xl tracking-tight font-semibold",
+    "h3": "text-xl tracking-tight font-medium",
+    "kpi_value": "text-3xl sm:text-4xl font-bold tracking-tighter text-primary",
+    "kpi_label": "text-xs uppercase tracking-[0.2em] text-text_secondary font-semibold",
+    "body": "text-sm text-text_primary leading-relaxed"
+  },
+  "layout": {
+    "spacing_system": "Generous padding: p-4 to p-8. Tight gaps for Control Room: gap-4 to gap-6.",
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+    "sidebar": "w-64 border-r border-border/50 bg-surface h-screen fixed left-0 top-0 flex flex-col",
+    "main_content": "ml-64 p-8 bg-background min-h-screen",
+    "card_style": "bg-surface border border-border/40 rounded-lg p-6 shadow-sm hover:shadow-md transition-shadow duration-200"
+  },
+  "components": {
+    "kpi_card": {
+      "structure": "flex flex-col gap-2",
+      "interaction": "hover:-translate-y-1 transition-transform",
+      "data_testid": "kpi-card-[metric-name]"
+    },
+    "data_table": {
+      "style": "w-full text-sm text-left border-collapse",
+      "header": "bg-secondary text-text_secondary uppercase tracking-wider text-xs py-3 px-4",
+      "row": "border-b border-border/40 hover:bg-background/50",
+      "data_testid": "table-[table-name]"
+    },
+    "progress_bar": {
+      "container": "w-full bg-border/50 rounded-full h-2 overflow-hidden",
+      "fill_success": "bg-primary h-full",
+      "fill_warning": "bg-accent_warning h-full",
+      "fill_danger": "bg-accent_danger h-full"
+    },
+    "button_primary": {
+      "style": "bg-primary text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-primary_hover transition-colors",
+      "data_testid": "btn-[action-name]"
+    },
+    "badge": {
+      "style": "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-secondary text-primary border border-primary/20"
+    }
+  },
+  "modules": {
+    "auth": {
+      "layout": "Split screen: left side branded abstract agriculture tech image, right side clean login form.",
+      "data_testid_prefix": "auth-"
+    },
+    "poultry_management": {
+      "batch_card": "Includes mortality progress bar (turns terracotta if > threshold), age in days badge, feed consumption sparkline.",
+      "data_testid_prefix": "poultry-"
+    },
+    "water_distribution": {
+      "tank_inventory": "Cards with vertical progress bars for current liters vs capacity. Uses blue accent (#0284C7).",
+      "lorry_card": "Status indicator (transit, idle, maintenance), assigned driver avatar, current route.",
+      "data_testid_prefix": "water-"
+    },
+    "inventory": {
+      "low_stock_alert": "Highlight row or card with clay/terracotta border and alert icon.",
+      "data_testid_prefix": "inventory-"
+    },
+    "finance": {
+      "pnl_statement": "Dense, Control Room style table layout with bold subtotal rows.",
+      "data_testid_prefix": "finance-"
+    }
+  },
+  "motion": {
+    "hover": "transition-all duration-200 ease-in-out",
+    "list_entrance": "staggered fade-in and slide-up (framer-motion)",
+    "kpi_load": "number counter animation"
+  },
+  "icons": "lucide-react",
+  "media": {
+    "images": [
+      {
+        "url": "https://images.unsplash.com/photo-1560493676-04071c5f467b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2OTV8MHwxfHNlYXJjaHwxfHxhZ3JpY3VsdHVyZSUyMHRlY2hub2xvZ3klMjBkYXNoYm9hcmQlMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc4MjA1NDIwM3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Rows of green crops in field at sunset. Use as abstract background for Auth/Login screen or hero banners.",
+        "category": "background"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1589922583749-6b8473a85048?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzN8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBwb3VsdHJ5JTIwZmFybSUyMGluc2lkZXxlbnwwfHx8fDE3ODIwNTQyMDR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "White chicken on green grass field. Use in poultry module empty states or headers.",
+        "category": "poultry"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1642738535034-e32c0be029c1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwyfHx3YXRlciUyMGRlbGl2ZXJ5JTIwbG9ycnklMjB0cnVja3xlbnwwfHx8fDE3ODIwNTQyMDR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Truck with water bottles. Use in water distribution module empty states or logistics dashboard.",
+        "category": "water_logistics"
+      }
+    ]
+  },
+  "accessibility": {
+    "contrast": "All text meets APCA guidelines against backgrounds.",
+    "focus_states": "focus:ring-2 focus:ring-primary focus:outline-none focus:ring-offset-2",
+    "aria": "Include aria-labels on icon-only buttons."
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the color palette to achieve the 'Agri Green' agritech theme. Map these hex codes as CSS variables.",
+    "Use Cabinet Grotesk for headings and Manrope for body text. Do NOT use Inter. You can use standard Google Fonts loading or import them in CSS.",
+    "Remember that the project uses React with pure .js/.jsx files (not TypeScript / .tsx). Do not write TypeScript syntax.",
+    "Build a sidebar layout with a solid off-white/sage-tinted main content background. Dashboard should feel like a dense, reliable operations console.",
+    "Apply Control Room grid density for the main dashboard (tight gaps like gap-6, fully utilized space).",
+    "For KPI Cards, use the specific typography: large tight value, small tracking-[0.2em] uppercase label.",
+    "Include 'data-testid' attributes on all forms, buttons, links, and interactive cards for testing.",
+    "Use Shadcn UI components but heavily customize them to remove the default 'Vercel-look'. Remove heavy shadows, use flat surfaces with 1px solid borders.",
+    "For Water Distribution module, introduce the Blue accent color (#0284C7) to distinguish from the green-heavy Poultry module.",
+    "Use the provided image URLs for auth screen split layout and module empty states."
+  ]
+}
