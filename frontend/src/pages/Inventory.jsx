@@ -6,6 +6,8 @@ import { Plus, X, Package, AlertTriangle } from "lucide-react";
 import { Field, SelectField } from "@/pages/Poultry";
 import { stockMoveBadge } from "@/lib/badges";
 
+const MAX_INVENTORY_MOVES_DISPLAYED = 15;
+
 export default function Inventory() {
   const qc = useQueryClient();
   const [dialog, setDialog] = useState(null); // "item" | "move"
@@ -100,7 +102,7 @@ export default function Inventory() {
             </tr>
           </thead>
           <tbody>
-            {(moves.data || []).slice(0, 15).map(m => {
+            {(moves.data || []).slice(0, MAX_INVENTORY_MOVES_DISPLAYED).map(m => {
               const item = items.data?.find(i => i.id === m.item_id);
               return (
                 <tr key={m.id} className="border-t border-border">

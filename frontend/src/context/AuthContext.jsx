@@ -23,7 +23,11 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const logout = useCallback(async () => {
-    try { await api.post("/auth/logout"); } catch (_) {}
+    try {
+      await api.post("/auth/logout");
+    } catch (err) {
+      console.error("Auth logout error:", err);
+    }
     setUser(false);
     window.location.href = "/login";
   }, []);

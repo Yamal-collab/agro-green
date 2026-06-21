@@ -10,6 +10,9 @@ const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
 const COLORS = ["#14532D", "#0284C7", "#CA8A04", "#C2410C", "#15803D", "#475569"];
 const LEGEND_STYLE = { fontSize: 11 };
 
+const MAX_TRANSACTIONS_DISPLAYED = 30;
+const MAX_PAYMENTS_DISPLAYED = 8;
+
 export default function Finance() {
   const qc = useQueryClient();
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
@@ -108,7 +111,7 @@ export default function Finance() {
               </tr>
             </thead>
             <tbody>
-              {(payments.data || []).slice(0, 8).map(p => {
+              {(payments.data || []).slice(0, MAX_PAYMENTS_DISPLAYED).map(p => {
                 const c = customers.data?.find(x => x.id === p.customer_id);
                 return (
                   <tr key={p.id} className="border-b border-border last:border-0">
@@ -140,7 +143,7 @@ export default function Finance() {
             </tr>
           </thead>
           <tbody>
-            {(txs.data || []).slice(0, 30).map(t => (
+            {(txs.data || []).slice(0, MAX_TRANSACTIONS_DISPLAYED).map(t => (
               <tr key={t.id} className="border-t border-border hover:bg-background/60">
                 <td className="py-3 px-4 text-xs">{t.date}</td>
                 <td><span className={`uppercase text-[10px] font-semibold px-2 py-0.5 rounded ${
