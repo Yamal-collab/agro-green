@@ -2,7 +2,7 @@ import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
-  LayoutDashboard, Users, Wheat, Egg, Bird, Droplets, ArrowLeftRight, Truck, LogOut, Leaf
+  LayoutDashboard, Users, Wheat, Egg, Bird, Droplets, ArrowLeftRight, Truck, LogOut, Leaf, BarChart3
 } from "lucide-react";
 
 const NAV = [
@@ -15,6 +15,7 @@ const NAV = [
   { to: "/water", label: "Water", icon: Droplets, testid: "nav-water" },
   { to: "/transfers", label: "Internal Transfers", icon: ArrowLeftRight, testid: "nav-transfers" },
   { to: "/finance", label: "Finance", icon: LayoutDashboard, testid: "nav-finance" },
+  { to: "/reports", label: "Reports", icon: BarChart3, testid: "nav-reports" },
 ];
 
 export default function Layout() {
