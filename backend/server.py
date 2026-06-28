@@ -481,6 +481,21 @@ async def pnl(user=Depends(get_user), bu: Optional[int] = None, month: Optional[
     return {"income": round(income, 2), "expense": round(expense, 2),
             "profit": round(income - expense, 2), "expense_by_category": by_cat}
 
+# ============ Reports (per-BU) ============
+@api.get("/reports/outstanding")
+async def reports_outstanding(user=Depends(get_user)):
+    custs = await db.customers.find({"outstanding": {"$gt": 0}}, {"_id": 0}).to_list(5000)
+    sups = await db.suppliers.find({"outstanding": {"$gt": 0}}, {"_id": 0}).to_list(5000)
+    custs.sort(key=lambda c: c.get("outstanding", 0), reverse=True)
+    sups.sort(key=lambda s: s.get("outstanding", 0), reverse=True)
+    return {"customers": custs, "suppliers": sups}
+
+@api.get("/reports/low-stock")
+async def reports_low_stock(user=Depends(get_user)):
+    items = await db.feed_items.find({"current_stock": {"$lt": 100}}, {"_id": 0}).to_list(2000)
+    items.sort(key=lambda f: f.get("current_stock", 0))
+    return items
+
 # ============ Dashboard ============
 @api.get("/dashboard/summary")
 async def dashboard(user=Depends(get_user)):

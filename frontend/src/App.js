@@ -14,6 +14,7 @@ import Farm from "@/pages/Farm";
 import Water from "@/pages/Water";
 import Transfers from "@/pages/Transfers";
 import Finance from "@/pages/Finance";
+import Reports from "@/pages/Reports";
 import { Toaster } from "@/components/ui/sonner";
 
 function App() {
@@ -33,6 +34,7 @@ function App() {
             <Route path="/water" element={<Water />} />
             <Route path="/transfers" element={<Transfers />} />
             <Route path="/finance" element={<Finance />} />
+            <Route path="/reports" element={<Reports />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
