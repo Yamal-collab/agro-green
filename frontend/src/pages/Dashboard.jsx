@@ -1,152 +1,109 @@
-import React, { useMemo } from "react";
+import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import api from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import KpiCard from "@/components/KpiCard";
-import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar } from "recharts";
-import { AlertTriangle, TrendingUp, Egg, Droplets } from "lucide-react";
+import { Wheat, Egg, Bird, Droplets, AlertTriangle } from "lucide-react";
+import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 
 const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
-const AXIS_TICK = { fontSize: 11 };
-const LINE_DOT = { r: 3 };
-const SKELETON_KEYS = ["s1", "s2", "s3", "s4"];
+const AXIS = { fontSize: 11 };
+
+const BU_META = [
+  { key: "bu1", label: "Feed Trading", icon: Wheat, color: "#14532D", extraKey: "stock_value", extraLabel: "Stock Value", extraFmt: currency },
+  { key: "bu2", label: "Egg Hatchery", icon: Egg, color: "#CA8A04", extraKey: "active_batches", extraLabel: "Active Batches", extraFmt: (n) => n },
+  { key: "bu3", label: "Own Farm", icon: Bird, color: "#15803D", extraKey: "current_birds", extraLabel: "Current Birds", extraFmt: (n) => n },
+  { key: "bu4", label: "Water", icon: Droplets, color: "#0284C7", extraKey: "water_stock", extraLabel: "Water Stock (L)", extraFmt: (n) => Number(n).toLocaleString() },
+];
 
 export default function Dashboard() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["dashboard"],
-    queryFn: async () => (await api.get("/dashboard/summary")).data,
-  });
-
-  if (isLoading || !data) {
-    return (
-      <div data-testid="dashboard-loading" className="space-y-4">
-        <div className="h-8 w-48 bg-secondary rounded animate-pulse" />
-        <div className="grid grid-cols-4 gap-4">
-          {SKELETON_KEYS.map((k) => <div key={k} className="h-28 bg-secondary rounded animate-pulse" />)}
-        </div>
-      </div>
-    );
-  }
-
-  const expenseCats = Object.entries(data.expense_by_category || {}).map(([name, value]) => ({ name, value }));
+  const { data, isLoading } = useQuery({ queryKey: ["dashboard"], queryFn: async () => (await api.get("/dashboard/summary")).data });
+  if (isLoading || !data) return <div data-testid="dashboard-loading" className="h-32 bg-secondary rounded animate-pulse" />;
 
   return (
     <div data-testid="dashboard-page">
-      <PageHeader
-        title="Dashboard"
-        subtitle="Operations overview across poultry and water distribution"
-        testid="dashboard-header"
-      />
+      <PageHeader title="Dashboard" subtitle="Combined view across all four business units" />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <KpiCard testid="kpi-today-sales" label="Today's Sales" value={currency(data.today_sales)} />
-        <KpiCard testid="kpi-month-revenue" label="Month Revenue" value={currency(data.month_income)} />
-        <KpiCard testid="kpi-month-expense" label="Month Expense" value={currency(data.month_expense)} accent="warn" />
-        <KpiCard testid="kpi-net-profit" label="Net Profit (mo)" value={currency(data.net_profit)} accent="success" />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {BU_META.map(({ key, label, icon: Icon, color, extraKey, extraLabel, extraFmt }) => {
+          const bu = data[key] || {};
+          return (
+            <div key={key} className="bg-white border border-border rounded-lg p-5" data-testid={`bu-card-${key}`}>
+              <div className="flex items-center gap-2 mb-3">
+                <Icon className="h-5 w-5" style={{ color }} />
+                <div className="font-bold" style={{ fontFamily: "var(--font-heading)", color }}>{label}</div>
+              </div>
+              <div className="text-2xl font-bold mb-1" style={{ color, fontFamily: "var(--font-heading)" }}>{currency(bu.profit)}</div>
+              <div className="text-xs text-muted-foreground mb-2">Net Profit (mo)</div>
+              <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-border">
+                <div><span className="text-muted-foreground">Revenue:</span> <span className="font-semibold">{currency(bu.revenue)}</span></div>
+                <div><span className="text-muted-foreground">Expense:</span> <span className="font-semibold">{currency(bu.expense)}</span></div>
+                <div className="col-span-2"><span className="text-muted-foreground">{extraLabel}:</span> <span className="font-semibold">{extraFmt(bu[extraKey])}</span></div>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+        <KpiCard testid="kpi-today" label="Today's Sales" value={currency(data.today_total_sales)} />
+        <KpiCard testid="kpi-revenue" label="Month Revenue" value={currency(data.combined.revenue)} />
+        <KpiCard testid="kpi-expense" label="Month Expense" value={currency(data.combined.expense)} accent="warn" />
         <KpiCard testid="kpi-outstanding" label="Outstanding" value={currency(data.outstanding)} accent="danger" />
-        <KpiCard testid="kpi-active-batches" label="Active Batches" value={data.active_batches} />
-        <KpiCard testid="kpi-lorries" label="Lorries" value={data.lorries_total} accent="water" />
-        <KpiCard testid="kpi-low-stock" label="Low Stock Items" value={data.low_stock_count} accent="warn" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-        <div className="lg:col-span-2 bg-white border border-border rounded-lg p-5" data-testid="revenue-chart">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground font-semibold">7-day trend</div>
-              <h3 className="text-lg font-bold mt-0.5" style={{ fontFamily: "var(--font-heading)" }}>Revenue</h3>
-            </div>
-            <TrendingUp className="h-4 w-4 text-primary" />
-          </div>
-          <ResponsiveContainer width="100%" height={220}>
+        <div className="lg:col-span-2 bg-white border border-border rounded-lg p-5">
+          <h3 className="text-base font-bold mb-3" style={{ fontFamily: "var(--font-heading)" }}>Revenue by Business Unit (6 months)</h3>
+          <ResponsiveContainer width="100%" height={240}>
             <LineChart data={data.revenue_trend}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="date" tick={AXIS_TICK} stroke="#94a3b8" />
-              <YAxis tick={AXIS_TICK} stroke="#94a3b8" />
+              <XAxis dataKey="month" tick={AXIS} stroke="#94a3b8" />
+              <YAxis tick={AXIS} stroke="#94a3b8" />
               <Tooltip />
-              <Line type="monotone" dataKey="revenue" stroke="#14532D" strokeWidth={2.5} dot={LINE_DOT} />
+              <Legend wrapperStyle={AXIS} />
+              <Line type="monotone" dataKey="bu1" stroke="#14532D" name="Feed" strokeWidth={2} />
+              <Line type="monotone" dataKey="bu2" stroke="#CA8A04" name="Hatchery" strokeWidth={2} />
+              <Line type="monotone" dataKey="bu3" stroke="#15803D" name="Farm" strokeWidth={2} />
+              <Line type="monotone" dataKey="bu4" stroke="#0284C7" name="Water" strokeWidth={2} />
             </LineChart>
           </ResponsiveContainer>
         </div>
 
-        <div className="bg-white border border-border rounded-lg p-5" data-testid="low-stock-panel">
-          <div className="flex items-center gap-2 mb-4">
-            <AlertTriangle className="h-4 w-4 text-[#CA8A04]" />
-            <h3 className="text-base font-bold" style={{ fontFamily: "var(--font-heading)" }}>Low Stock Alerts</h3>
+        <div className="bg-white border border-border rounded-lg p-5">
+          <div className="flex items-center gap-2 mb-3"><AlertTriangle className="h-4 w-4 text-[#CA8A04]" />
+            <h3 className="text-base font-bold" style={{ fontFamily: "var(--font-heading)" }}>Alerts</h3>
           </div>
-          {data.low_stock.length === 0 ? (
-            <div className="text-sm text-muted-foreground">All stocks healthy ✓</div>
-          ) : (
-            <ul className="space-y-2">
-              {data.low_stock.slice(0, 6).map((i) => (
-                <li key={i.id} className="flex justify-between items-center text-sm border-b border-border last:border-0 pb-2">
-                  <div>
-                    <div className="font-medium">{i.name}</div>
-                    <div className="text-[11px] text-muted-foreground">{i.category}</div>
-                  </div>
-                  <span className="text-[#C2410C] font-semibold">{i.stock} {i.unit}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <div className="text-xs text-muted-foreground mb-2 uppercase tracking-wider">Low Feed Stock</div>
+          {data.low_feed_stock.length === 0 ? <div className="text-sm text-muted-foreground mb-3">All stocks healthy ✓</div> :
+            <ul className="text-sm mb-3 space-y-1">{data.low_feed_stock.slice(0,4).map(f => (
+              <li key={f.id} className="flex justify-between"><span>{f.name}</span><span className="text-[#C2410C] font-semibold">{f.current_stock} {f.unit}</span></li>
+            ))}</ul>}
+          <div className="text-xs text-muted-foreground mb-2 uppercase tracking-wider">Top Pending Customers</div>
+          {data.top_customers.filter(c => c.outstanding > 0).length === 0 ? <div className="text-sm text-muted-foreground">No pending dues</div> :
+            <ul className="text-sm space-y-1">{data.top_customers.filter(c => c.outstanding > 0).slice(0,4).map(c => (
+              <li key={c.id} className="flex justify-between"><span>{c.name}</span><span className="text-[#C2410C] font-semibold">{currency(c.outstanding)}</span></li>
+            ))}</ul>}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-white border border-border rounded-lg p-5" data-testid="recent-poultry">
-          <div className="flex items-center gap-2 mb-3">
-            <Egg className="h-4 w-4 text-primary" />
-            <h3 className="text-base font-bold" style={{ fontFamily: "var(--font-heading)" }}>Recent Poultry Sales</h3>
-          </div>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-[10px] uppercase tracking-wider text-muted-foreground border-b border-border">
-                <th className="text-left py-2">Invoice</th><th className="text-left">Customer</th><th className="text-right">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.recent_poultry_sales.map((s) => (
-                <tr key={s.id} className="border-b border-border last:border-0">
-                  <td className="py-2 font-mono text-xs">{s.invoice_no}</td>
-                  <td>{s.customer_name}</td>
-                  <td className="text-right font-semibold">{currency(s.total)}</td>
-                </tr>
-              ))}
-              {data.recent_poultry_sales.length === 0 && (
-                <tr><td colSpan={3} className="py-4 text-center text-muted-foreground text-xs">No sales yet</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="bg-white border border-border rounded-lg p-5" data-testid="recent-water">
-          <div className="flex items-center gap-2 mb-3">
-            <Droplets className="h-4 w-4 text-[#0284C7]" />
-            <h3 className="text-base font-bold" style={{ fontFamily: "var(--font-heading)" }}>Recent Water Sales</h3>
-          </div>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-[10px] uppercase tracking-wider text-muted-foreground border-b border-border">
-                <th className="text-left py-2">Invoice</th><th className="text-left">Customer</th><th className="text-right">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.recent_water_sales.map((s) => (
-                <tr key={s.id} className="border-b border-border last:border-0">
-                  <td className="py-2 font-mono text-xs">{s.invoice_no}</td>
-                  <td>{s.customer_name}</td>
-                  <td className="text-right font-semibold">{currency(s.total)}</td>
-                </tr>
-              ))}
-              {data.recent_water_sales.length === 0 && (
-                <tr><td colSpan={3} className="py-4 text-center text-muted-foreground text-xs">No sales yet</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+      <div className="bg-white border border-border rounded-lg p-5">
+        <h3 className="text-base font-bold mb-3" style={{ fontFamily: "var(--font-heading)" }}>Recent Transactions</h3>
+        <table className="w-full text-sm" data-testid="recent-tx-table">
+          <thead><tr className="text-[10px] uppercase tracking-wider text-muted-foreground border-b border-border">
+            <th className="text-left py-2">Date</th><th className="text-left">BU</th><th className="text-left">Type</th><th className="text-left">Category</th><th className="text-left">Notes</th><th className="text-right">Amount</th>
+          </tr></thead>
+          <tbody>{data.recent_transactions.map(t => (
+            <tr key={t.id} className="border-b border-border last:border-0">
+              <td className="py-2 text-xs">{t.date}</td>
+              <td>BU{t.business_unit}</td>
+              <td><span className={`uppercase text-[10px] font-semibold px-2 py-0.5 rounded ${t.type === "income" ? "bg-[#15803D]/10 text-[#15803D]" : "bg-[#C2410C]/10 text-[#C2410C]"}`}>{t.type}</span></td>
+              <td>{t.category}</td>
+              <td className="text-muted-foreground text-xs">{t.notes}</td>
+              <td className={`text-right font-semibold ${t.type === "income" ? "text-[#15803D]" : "text-[#C2410C]"}`}>{currency(t.amount)}</td>
+            </tr>
+          ))}{data.recent_transactions.length === 0 && <tr><td colSpan={6} className="py-8 text-center text-muted-foreground">No transactions yet</td></tr>}</tbody>
+        </table>
       </div>
     </div>
   );

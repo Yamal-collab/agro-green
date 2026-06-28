@@ -1,544 +1,477 @@
 from dotenv import load_dotenv
 from pathlib import Path
+load_dotenv(Path(__file__).parent / ".env")
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / ".env")
-
-import os
-import uuid
-import logging
-import bcrypt
-import jwt
+import os, uuid, logging, bcrypt, jwt
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
-
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 
-# -------------------- Setup --------------------
-mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
+client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
-
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGO = "HS256"
-ACCESS_TTL_MIN = 60 * 24  # 24h for internal dashboard
+TTL_MIN = 60 * 24
 
-app = FastAPI(title="AgriBiz Platform API")
+app = FastAPI(title="AgriBiz ERP")
 api = APIRouter(prefix="/api")
-
 bearer = HTTPBearer(auto_error=False)
 
-VALID_ROLES = {"super_admin", "owner", "manager", "accountant", "farm_staff", "driver"}
+def now_iso(): return datetime.now(timezone.utc).isoformat()
+def new_id(): return str(uuid.uuid4())
+def hp(p): return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+def vp(p, h):
+    try: return bcrypt.checkpw(p.encode(), h.encode())
+    except: return False
 
-# -------------------- Helpers --------------------
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def mk_token(uid, email):
+    return jwt.encode({"sub": uid, "email": email, "exp": datetime.now(timezone.utc) + timedelta(minutes=TTL_MIN)}, JWT_SECRET, algorithm=JWT_ALGO)
 
-def new_id() -> str:
-    return str(uuid.uuid4())
-
-def hash_password(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-def verify_password(pw: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(pw.encode("utf-8"), hashed.encode("utf-8"))
-    except Exception:
-        return False
-
-def make_token(user_id: str, email: str, role: str) -> str:
-    payload = {
-        "sub": user_id,
-        "email": email,
-        "role": role,
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TTL_MIN),
-        "type": "access",
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
-
-def strip_user(u: dict) -> dict:
-    u = {**u}
-    u.pop("password_hash", None)
-    u.pop("_id", None)
+async def get_user(request: Request, creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
+    token = creds.credentials if creds else request.cookies.get("access_token")
+    if not token: raise HTTPException(401, "Not authenticated")
+    try: payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+    except: raise HTTPException(401, "Invalid token")
+    u = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+    if not u: raise HTTPException(401, "User not found")
     return u
 
-async def get_current_user(
-    request: Request,
-    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
-) -> dict:
-    token = None
-    if creds and creds.credentials:
-        token = creds.credentials
-    if not token:
-        token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    user = await db.users.find_one({"id": payload["sub"]})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return strip_user(user)
+async def next_seq(key: str) -> int:
+    doc = await db.counters.find_one_and_update({"_id": key}, {"$inc": {"seq": 1}}, upsert=True, return_document=True)
+    return doc["seq"]
 
-def require_roles(*roles: str):
-    async def checker(user: dict = Depends(get_current_user)) -> dict:
-        if user.get("role") not in roles and user.get("role") != "super_admin":
-            raise HTTPException(status_code=403, detail="Forbidden")
-        return user
-    return checker
+async def gen_invoice(prefix: str) -> str:
+    n = await next_seq(prefix)
+    return f"{prefix}-{datetime.now().year}-{n:05d}"
 
-# -------------------- Models --------------------
-class RegisterIn(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=6)
-    name: str
-    role: str = "farm_staff"
-    phone: Optional[str] = None
+async def fin_write(bu: int, type_: str, category: str, amount: float, date: str, ref_id: str = "", notes: str = "", source: str = ""):
+    await db.finance_transactions.insert_one({
+        "id": new_id(), "business_unit": bu, "type": type_, "category": category,
+        "amount": round(amount, 2), "date": date, "source": source, "ref_id": ref_id,
+        "notes": notes, "created_at": now_iso(),
+    })
 
+# ============ Models ============
 class LoginIn(BaseModel):
-    email: EmailStr
-    password: str
-
-class UserUpdateIn(BaseModel):
-    name: Optional[str] = None
-    role: Optional[str] = None
-    phone: Optional[str] = None
-    status: Optional[str] = None
+    email: EmailStr; password: str
 
 class CustomerIn(BaseModel):
-    name: str
-    business_name: Optional[str] = ""
-    phone: Optional[str] = ""
-    email: Optional[str] = ""
-    address: Optional[str] = ""
-    gst: Optional[str] = ""
-    credit_limit: float = 0.0
-    payment_terms: Optional[str] = "Net 30"
-    status: str = "active"
+    name: str; phone: str = ""; farm_name: str = ""; address: str = ""; gst: str = ""; business_units: List[int] = []
 
-class BatchIn(BaseModel):
-    batch_no: str
-    hatch_date: str
-    quantity: int
-    mortality: int = 0
-    feed_kg: float = 0.0
-    status: str = "active"
-    notes: Optional[str] = ""
+class SupplierIn(BaseModel):
+    name: str; phone: str = ""; address: str = ""; gst: str = ""; business_unit: int = 1
 
-class PoultrySaleIn(BaseModel):
-    customer_id: str
-    customer_name: str
-    date: str
-    product: str  # eggs/chicks/chickens/hens
-    quantity: float
-    unit_price: float
-    transport: float = 0.0
-    discount: float = 0.0
-    payment_status: str = "pending"  # paid/partial/pending
-    batch_id: Optional[str] = None
+class FeedItemIn(BaseModel):
+    name: str; brand: str = ""; category: str = ""; unit: str = "kg"
 
-class ExpenseIn(BaseModel):
-    category: str
-    amount: float
-    date: str
-    notes: Optional[str] = ""
-    batch_id: Optional[str] = None
-    lorry_id: Optional[str] = None
+class FeedPurchaseIn(BaseModel):
+    supplier_id: str; feed_item_id: str; date: str; quantity: float; purchase_rate: float
+    transport: float = 0.0; other: float = 0.0; payment_status: str = "pending"
+
+class FeedSaleIn(BaseModel):
+    customer_id: str; feed_item_id: str; date: str; quantity: float; unit_price: float
+    transport: float = 0.0; discount: float = 0.0; payment_status: str = "pending"
+
+class FeedTransferIn(BaseModel):
+    feed_item_id: str; date: str; quantity: float; notes: str = ""
+
+class EggPurchaseIn(BaseModel):
+    supplier_id: str; date: str; quantity: int; rate: float; transport: float = 0.0
+    incubation_start: str
+
+class BatchUpdateIn(BaseModel):
+    hatch_date: Optional[str] = None; hatched_chicks: Optional[int] = None
+    dead_eggs: Optional[int] = None; status: Optional[str] = None; notes: Optional[str] = None
+
+class BatchExpenseIn(BaseModel):
+    batch_id: str; category: str; amount: float; date: str; notes: str = ""
+
+class ChickSaleIn(BaseModel):
+    batch_id: str; customer_id: str; date: str; quantity: int; unit_price: float
+    transport: float = 0.0; discount: float = 0.0; payment_status: str = "pending"
+
+class ChickTransferIn(BaseModel):
+    batch_id: str; date: str; quantity: int; notes: str = ""
+
+class FarmSaleIn(BaseModel):
+    customer_id: str; date: str; quantity: int; unit_price: float
+    transport: float = 0.0; discount: float = 0.0; payment_status: str = "pending"
+
+class FarmExpenseIn(BaseModel):
+    category: str; amount: float; date: str; notes: str = ""
 
 class TankIn(BaseModel):
-    name: str
-    capacity: float
-    current_liters: float = 0.0
+    name: str; capacity: float; current_liters: float = 0.0
 
-class TankAdjustIn(BaseModel):
-    delta: float  # +/-
-    reason: str = "manual"
-
-class LorryIn(BaseModel):
-    registration_no: str
-    capacity: float
-    driver_id: Optional[str] = None
-    driver_name: Optional[str] = ""
-    status: str = "idle"  # idle/transit/maintenance
+class TankAddIn(BaseModel):
+    tank_id: str; date: str; liters: float; source: str = ""; loading_charge: float = 0.0
 
 class WaterSaleIn(BaseModel):
-    customer_id: str
-    customer_name: str
-    date: str
-    liters: float
-    rate: float
-    delivery: float = 0.0
-    payment_status: str = "pending"
-    lorry_id: Optional[str] = None
+    customer_id: str; date: str; liters: float; rate: float; received: float = 0.0; notes: str = ""
 
-class InventoryItemIn(BaseModel):
-    name: str
-    category: str  # feed/medicine/vaccine/water/other
-    unit: str = "kg"
-    stock: float = 0.0
-    threshold: float = 0.0
-
-class StockMoveIn(BaseModel):
-    item_id: str
-    type: str  # in/out/adjust
-    quantity: float
-    reason: Optional[str] = ""
+class WaterExpenseIn(BaseModel):
+    category: str; amount: float; date: str; notes: str = ""
 
 class PaymentIn(BaseModel):
-    customer_id: str
-    amount: float
-    date: str
-    notes: Optional[str] = ""
-    method: Optional[str] = "cash"
+    party_id: str; party_type: str  # "customer" | "supplier"
+    amount: float; date: str; method: str = "cash"; notes: str = ""; business_unit: int = 1
 
-# -------------------- Auth Routes --------------------
-@api.post("/auth/register")
-async def register(payload: RegisterIn, user: dict = Depends(get_current_user)):
-    # Only super_admin / owner can create users
-    if user.get("role") not in ("super_admin", "owner"):
-        raise HTTPException(status_code=403, detail="Only admin/owner can create users")
-    if payload.role not in VALID_ROLES:
-        raise HTTPException(status_code=400, detail="Invalid role")
-    email = payload.email.lower()
-    if await db.users.find_one({"email": email}):
-        raise HTTPException(status_code=400, detail="Email already exists")
-    doc = {
-        "id": new_id(),
-        "email": email,
-        "password_hash": hash_password(payload.password),
-        "name": payload.name,
-        "role": payload.role,
-        "phone": payload.phone or "",
-        "status": "active",
-        "created_at": now_iso(),
-    }
-    await db.users.insert_one(doc)
-    doc.pop("_id", None)
-    return strip_user(doc)
-
+# ============ Auth ============
 @api.post("/auth/login")
 async def login(payload: LoginIn, response: Response):
-    email = payload.email.lower()
-    user = await db.users.find_one({"email": email})
-    if not user or not verify_password(payload.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    if user.get("status") == "disabled":
-        raise HTTPException(status_code=403, detail="Account disabled")
-    token = make_token(user["id"], user["email"], user["role"])
-    response.set_cookie(
-        key="access_token", value=token, httponly=True,
-        secure=True, samesite="lax", max_age=ACCESS_TTL_MIN * 60, path="/",
-    )
-    await db.audit_logs.insert_one({
-        "id": new_id(), "user_id": user["id"], "action": "login",
-        "details": {}, "ts": now_iso()
-    })
-    return {"access_token": token, "token_type": "bearer", "user": strip_user(user)}
+    u = await db.users.find_one({"email": payload.email.lower()})
+    if not u or not vp(payload.password, u["password_hash"]):
+        raise HTTPException(401, "Invalid credentials")
+    tok = mk_token(u["id"], u["email"])
+    response.set_cookie("access_token", tok, httponly=True, secure=True, samesite="lax", max_age=TTL_MIN*60, path="/")
+    return {"access_token": tok, "user": {"id": u["id"], "email": u["email"], "name": u["name"], "role": "admin"}}
 
 @api.post("/auth/logout")
-async def logout(response: Response, user: dict = Depends(get_current_user)):
-    response.delete_cookie(key="access_token", path="/")
+async def logout(response: Response, user=Depends(get_user)):
+    response.delete_cookie("access_token", path="/")
     return {"ok": True}
 
 @api.get("/auth/me")
-async def me(user: dict = Depends(get_current_user)):
-    return user
+async def me(user=Depends(get_user)): return user
 
-@api.get("/users")
-async def list_users(user: dict = Depends(require_roles("super_admin", "owner", "manager"))):
-    items = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(500)
-    return items
+# ============ Generic helpers ============
+async def list_col(coll, q=None, limit=2000):
+    return await coll.find(q or {}, {"_id": 0}).sort("created_at", -1).to_list(limit)
 
-@api.patch("/users/{user_id}")
-async def update_user(user_id: str, payload: UserUpdateIn, user: dict = Depends(require_roles("super_admin", "owner"))):
-    update = {k: v for k, v in payload.model_dump().items() if v is not None}
-    if "role" in update and update["role"] not in VALID_ROLES:
-        raise HTTPException(status_code=400, detail="Invalid role")
-    if not update:
-        raise HTTPException(status_code=400, detail="No fields to update")
-    res = await db.users.update_one({"id": user_id}, {"$set": update})
-    if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="User not found")
-    doc = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
-    return doc
-
-# -------------------- Generic CRUD helpers --------------------
-async def list_collection(coll, filt: Optional[dict] = None, limit: int = 1000):
-    items = await coll.find(filt or {}, {"_id": 0}).sort("created_at", -1).to_list(limit)
-    return items
-
-# -------------------- Customers --------------------
+# ============ Customers (shared across BUs) ============
 @api.get("/customers")
-async def list_customers(user: dict = Depends(get_current_user)):
-    return await list_collection(db.customers)
+async def list_customers(user=Depends(get_user)): return await list_col(db.customers)
 
 @api.post("/customers")
-async def create_customer(payload: CustomerIn, user: dict = Depends(require_roles("super_admin","owner","manager","accountant"))):
-    doc = {"id": new_id(), **payload.model_dump(), "outstanding": 0.0, "created_at": now_iso()}
-    await db.customers.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
+async def create_customer(p: CustomerIn, user=Depends(get_user)):
+    d = {"id": new_id(), **p.model_dump(), "outstanding": 0.0, "status": "active", "created_at": now_iso()}
+    await db.customers.insert_one(d); d.pop('_id', None); d.pop("_id", None); return d
 
-@api.patch("/customers/{cid}")
-async def update_customer(cid: str, payload: CustomerIn, user: dict = Depends(require_roles("super_admin","owner","manager","accountant"))):
-    res = await db.customers.update_one({"id": cid}, {"$set": payload.model_dump()})
-    if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Customer not found")
-    return await db.customers.find_one({"id": cid}, {"_id": 0})
+# ============ Suppliers ============
+@api.get("/suppliers")
+async def list_suppliers(user=Depends(get_user)): return await list_col(db.suppliers)
 
-@api.delete("/customers/{cid}")
-async def delete_customer(cid: str, user: dict = Depends(require_roles("super_admin","owner"))):
-    await db.customers.update_one({"id": cid}, {"$set": {"status": "deleted"}})
-    return {"ok": True}
+@api.post("/suppliers")
+async def create_supplier(p: SupplierIn, user=Depends(get_user)):
+    d = {"id": new_id(), **p.model_dump(), "outstanding": 0.0, "created_at": now_iso()}
+    await db.suppliers.insert_one(d); d.pop('_id', None); d.pop("_id", None); return d
 
-@api.get("/customers/{cid}/ledger")
-async def customer_ledger(cid: str, user: dict = Depends(get_current_user)):
-    customer = await db.customers.find_one({"id": cid}, {"_id": 0})
-    if not customer:
-        raise HTTPException(status_code=404, detail="Customer not found")
-    poultry = await db.poultry_sales.find({"customer_id": cid}, {"_id": 0}).to_list(1000)
-    water = await db.water_sales.find({"customer_id": cid}, {"_id": 0}).to_list(1000)
-    payments = await db.payments.find({"customer_id": cid}, {"_id": 0}).to_list(1000)
-    return {"customer": customer, "poultry_sales": poultry, "water_sales": water, "payments": payments}
+# ============ BU1: Feed Items + Purchases + Sales + Transfer ============
+@api.get("/feed/items")
+async def feed_items(user=Depends(get_user)): return await list_col(db.feed_items)
 
-# -------------------- Poultry --------------------
-@api.get("/poultry/batches")
-async def list_batches(user: dict = Depends(get_current_user)):
-    return await list_collection(db.poultry_batches)
+@api.post("/feed/items")
+async def feed_item_create(p: FeedItemIn, user=Depends(get_user)):
+    d = {"id": new_id(), **p.model_dump(), "current_stock": 0.0, "weighted_avg_cost": 0.0, "created_at": now_iso()}
+    await db.feed_items.insert_one(d); d.pop('_id', None); d.pop("_id", None); return d
 
-@api.post("/poultry/batches")
-async def create_batch(payload: BatchIn, user: dict = Depends(require_roles("super_admin","owner","manager","farm_staff"))):
-    doc = {"id": new_id(), **payload.model_dump(), "created_at": now_iso()}
-    await db.poultry_batches.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
+@api.get("/feed/purchases")
+async def feed_purchases(user=Depends(get_user)): return await list_col(db.feed_purchases)
 
-@api.patch("/poultry/batches/{bid}")
-async def update_batch(bid: str, payload: BatchIn, user: dict = Depends(require_roles("super_admin","owner","manager","farm_staff"))):
-    res = await db.poultry_batches.update_one({"id": bid}, {"$set": payload.model_dump()})
-    if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Batch not found")
+@api.post("/feed/purchases")
+async def feed_purchase(p: FeedPurchaseIn, user=Depends(get_user)):
+    item = await db.feed_items.find_one({"id": p.feed_item_id})
+    if not item: raise HTTPException(404, "Feed item not found")
+    total = p.quantity * p.purchase_rate + p.transport + p.other
+    eff_rate = total / p.quantity if p.quantity else 0
+    cur_stock = item["current_stock"]; cur_avg = item["weighted_avg_cost"]
+    new_stock = cur_stock + p.quantity
+    new_avg = ((cur_stock * cur_avg) + (p.quantity * eff_rate)) / new_stock if new_stock else 0
+    await db.feed_items.update_one({"id": p.feed_item_id}, {"$set": {"current_stock": new_stock, "weighted_avg_cost": round(new_avg, 4)}})
+    d = {"id": new_id(), **p.model_dump(), "total_cost": round(total, 2), "created_at": now_iso()}
+    await db.feed_purchases.insert_one(d); d.pop('_id', None)
+    if p.payment_status != "paid":
+        await db.suppliers.update_one({"id": p.supplier_id}, {"$inc": {"outstanding": total}})
+    await fin_write(1, "expense", "Feed Purchase", total, p.date, d["id"], item["name"], "feed_purchase")
+    return d
+
+@api.get("/feed/sales")
+async def feed_sales(user=Depends(get_user)): return await list_col(db.feed_sales)
+
+@api.post("/feed/sales")
+async def feed_sale(p: FeedSaleIn, user=Depends(get_user)):
+    item = await db.feed_items.find_one({"id": p.feed_item_id})
+    if not item or item["current_stock"] < p.quantity:
+        raise HTTPException(400, "Insufficient stock")
+    cust = await db.customers.find_one({"id": p.customer_id})
+    if not cust: raise HTTPException(404, "Customer not found")
+    total = p.quantity * p.unit_price + p.transport - p.discount
+    cost = p.quantity * item["weighted_avg_cost"]
+    inv = await gen_invoice("FE")
+    d = {"id": new_id(), "invoice_no": inv, **p.model_dump(),
+         "customer_name": cust["name"], "feed_name": item["name"],
+         "total": round(total, 2), "cost_basis": round(cost, 2), "created_at": now_iso()}
+    await db.feed_sales.insert_one(d); d.pop('_id', None)
+    await db.feed_items.update_one({"id": p.feed_item_id}, {"$inc": {"current_stock": -p.quantity}})
+    if p.payment_status != "paid":
+        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": total}})
+    await fin_write(1, "income", "Feed Sale", total, p.date, d["id"], inv, "feed_sale")
+    return d
+
+@api.post("/feed/transfer")
+async def feed_transfer(p: FeedTransferIn, user=Depends(get_user)):
+    item = await db.feed_items.find_one({"id": p.feed_item_id})
+    if not item or item["current_stock"] < p.quantity:
+        raise HTTPException(400, "Insufficient stock")
+    val = p.quantity * item["weighted_avg_cost"]
+    await db.feed_items.update_one({"id": p.feed_item_id}, {"$inc": {"current_stock": -p.quantity}})
+    d = {"id": new_id(), "type": "feed", "from_unit": 1, "to_unit": 3,
+         "ref_item_id": p.feed_item_id, "item_name": item["name"],
+         "quantity": p.quantity, "unit_cost": item["weighted_avg_cost"],
+         "total_value": round(val, 2), "date": p.date, "notes": p.notes, "created_at": now_iso()}
+    await db.internal_transfers.insert_one(d); d.pop('_id', None)
+    await fin_write(1, "income", "Internal Transfer (Feed→Farm)", val, p.date, d["id"], "", "internal_transfer")
+    await fin_write(3, "expense", "Feed Consumption", val, p.date, d["id"], item["name"], "internal_transfer")
+    return d
+
+# ============ BU2: Egg Purchases → Batches → Expenses → Chick Sales → Transfer ============
+@api.get("/egg/purchases")
+async def egg_purchases(user=Depends(get_user)): return await list_col(db.egg_purchases)
+
+@api.post("/egg/purchases")
+async def egg_purchase(p: EggPurchaseIn, user=Depends(get_user)):
+    total = p.quantity * p.rate + p.transport
+    batch_no = f"BATCH-{datetime.now().year}-{await next_seq('BATCH'):04d}"
+    batch = {"id": new_id(), "batch_no": batch_no, "egg_qty": p.quantity,
+             "incubation_start": p.incubation_start, "hatch_date": None,
+             "hatched_chicks": 0, "dead_eggs": 0, "transferred": 0, "sold": 0,
+             "status": "incubating", "notes": "", "created_at": now_iso()}
+    await db.poultry_batches.insert_one(batch); batch.pop('_id', None)
+    d = {"id": new_id(), "batch_id": batch["id"], **p.model_dump(),
+         "total_cost": round(total, 2), "created_at": now_iso()}
+    await db.egg_purchases.insert_one(d); d.pop('_id', None)
+    if True:  # always log to supplier outstanding & finance
+        await db.suppliers.update_one({"id": p.supplier_id}, {"$inc": {"outstanding": total}})
+    await fin_write(2, "expense", "Egg Purchase", total, p.date, d["id"], batch_no, "egg_purchase")
+    return {"purchase": d, "batch": batch}
+
+@api.get("/hatchery/batches")
+async def list_batches(user=Depends(get_user)): return await list_col(db.poultry_batches)
+
+@api.patch("/hatchery/batches/{bid}")
+async def update_batch(bid: str, p: BatchUpdateIn, user=Depends(get_user)):
+    upd = {k: v for k, v in p.model_dump().items() if v is not None}
+    if not upd: raise HTTPException(400, "No fields")
+    await db.poultry_batches.update_one({"id": bid}, {"$set": upd})
     return await db.poultry_batches.find_one({"id": bid}, {"_id": 0})
 
-@api.delete("/poultry/batches/{bid}")
-async def delete_batch(bid: str, user: dict = Depends(require_roles("super_admin","owner","manager"))):
-    await db.poultry_batches.delete_one({"id": bid})
-    return {"ok": True}
+@api.get("/hatchery/expenses")
+async def batch_expenses(user=Depends(get_user)): return await list_col(db.batch_expenses)
 
-@api.get("/poultry/sales")
-async def list_poultry_sales(user: dict = Depends(get_current_user)):
-    return await list_collection(db.poultry_sales)
+@api.post("/hatchery/expenses")
+async def add_batch_expense(p: BatchExpenseIn, user=Depends(get_user)):
+    d = {"id": new_id(), **p.model_dump(), "created_at": now_iso()}
+    await db.batch_expenses.insert_one(d); d.pop('_id', None)
+    await fin_write(2, "expense", p.category, p.amount, p.date, d["id"], "", "batch_expense")
+    return d
 
-@api.post("/poultry/sales")
-async def create_poultry_sale(payload: PoultrySaleIn, user: dict = Depends(require_roles("super_admin","owner","manager","accountant"))):
-    total = payload.quantity * payload.unit_price + payload.transport - payload.discount
-    count = await db.poultry_sales.count_documents({}) + 1
-    invoice_no = f"P-{datetime.now().year}-{count:05d}"
-    doc = {"id": new_id(), "invoice_no": invoice_no, **payload.model_dump(),
-           "total": round(total, 2), "created_at": now_iso()}
-    await db.poultry_sales.insert_one(doc)
-    doc.pop("_id", None)
-    if payload.payment_status != "paid":
-        await db.customers.update_one({"id": payload.customer_id}, {"$inc": {"outstanding": doc["total"]}})
-    await db.finance_transactions.insert_one({
-        "id": new_id(), "type": "income", "category": "poultry_sale",
-        "amount": doc["total"], "date": payload.date, "source": "poultry",
-        "ref_id": doc["id"], "notes": invoice_no, "created_at": now_iso()
-    })
-    return doc
+@api.get("/hatchery/sales")
+async def chick_sales(user=Depends(get_user)): return await list_col(db.chick_sales)
 
-@api.get("/poultry/expenses")
-async def list_poultry_expenses(user: dict = Depends(get_current_user)):
-    return await list_collection(db.poultry_expenses)
+@api.post("/hatchery/sales")
+async def chick_sale(p: ChickSaleIn, user=Depends(get_user)):
+    batch = await db.poultry_batches.find_one({"id": p.batch_id})
+    cust = await db.customers.find_one({"id": p.customer_id})
+    if not batch or not cust: raise HTTPException(404, "Batch/customer not found")
+    avail = batch["hatched_chicks"] - batch.get("sold", 0) - batch.get("transferred", 0)
+    if avail < p.quantity: raise HTTPException(400, f"Only {avail} chicks available")
+    total = p.quantity * p.unit_price + p.transport - p.discount
+    inv = await gen_invoice("CH")
+    d = {"id": new_id(), "invoice_no": inv, **p.model_dump(),
+         "customer_name": cust["name"], "batch_no": batch["batch_no"],
+         "total": round(total, 2), "created_at": now_iso()}
+    await db.chick_sales.insert_one(d); d.pop('_id', None)
+    await db.poultry_batches.update_one({"id": p.batch_id}, {"$inc": {"sold": p.quantity}})
+    if p.payment_status != "paid":
+        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": total}})
+    await fin_write(2, "income", "Chick Sale", total, p.date, d["id"], inv, "chick_sale")
+    return d
 
-@api.post("/poultry/expenses")
-async def create_poultry_expense(payload: ExpenseIn, user: dict = Depends(require_roles("super_admin","owner","manager","accountant","farm_staff"))):
-    doc = {"id": new_id(), **payload.model_dump(), "created_at": now_iso()}
-    await db.poultry_expenses.insert_one(doc)
-    doc.pop("_id", None)
-    await db.finance_transactions.insert_one({
-        "id": new_id(), "type": "expense", "category": payload.category,
-        "amount": payload.amount, "date": payload.date, "source": "poultry",
-        "ref_id": doc["id"], "notes": payload.notes, "created_at": now_iso()
-    })
-    return doc
+async def compute_batch_transfer_cost(batch_id: str) -> float:
+    batch = await db.poultry_batches.find_one({"id": batch_id})
+    egg = await db.egg_purchases.find_one({"batch_id": batch_id})
+    exps = await db.batch_expenses.find({"batch_id": batch_id}).to_list(1000)
+    inv = (egg["total_cost"] if egg else 0) + sum(e["amount"] for e in exps)
+    n = max(batch.get("hatched_chicks", 0) or 1, 1)
+    return round(inv / n, 4)
 
-# -------------------- Water --------------------
+@api.post("/hatchery/transfer")
+async def chick_transfer(p: ChickTransferIn, user=Depends(get_user)):
+    batch = await db.poultry_batches.find_one({"id": p.batch_id})
+    if not batch: raise HTTPException(404, "Batch not found")
+    avail = batch["hatched_chicks"] - batch.get("sold", 0) - batch.get("transferred", 0)
+    if avail < p.quantity: raise HTTPException(400, f"Only {avail} chicks available")
+    unit_cost = await compute_batch_transfer_cost(p.batch_id)
+    val = p.quantity * unit_cost
+    await db.poultry_batches.update_one({"id": p.batch_id}, {"$inc": {"transferred": p.quantity}})
+    d = {"id": new_id(), "type": "chicks", "from_unit": 2, "to_unit": 3,
+         "ref_item_id": p.batch_id, "item_name": batch["batch_no"],
+         "quantity": p.quantity, "unit_cost": unit_cost, "total_value": round(val, 2),
+         "date": p.date, "notes": p.notes, "created_at": now_iso()}
+    await db.internal_transfers.insert_one(d); d.pop('_id', None)
+    await db.farm_stock.insert_one({"id": new_id(), "source_batch_id": p.batch_id,
+         "batch_no": batch["batch_no"], "qty_received": p.quantity, "transfer_cost_per_bird": unit_cost,
+         "current_count": p.quantity, "date": p.date, "created_at": now_iso()})
+    await fin_write(2, "income", "Internal Transfer (Chicks→Farm)", val, p.date, d["id"], "", "internal_transfer")
+    await fin_write(3, "expense", "Chick Purchase (internal)", val, p.date, d["id"], batch["batch_no"], "internal_transfer")
+    return d
+
+@api.get("/hatchery/batches/{bid}/pnl")
+async def batch_pnl(bid: str, user=Depends(get_user)):
+    batch = await db.poultry_batches.find_one({"id": bid}, {"_id": 0})
+    if not batch: raise HTTPException(404, "Batch not found")
+    egg = await db.egg_purchases.find_one({"batch_id": bid}, {"_id": 0})
+    exps = await db.batch_expenses.find({"batch_id": bid}, {"_id": 0}).to_list(1000)
+    sales = await db.chick_sales.find({"batch_id": bid}, {"_id": 0}).to_list(1000)
+    transfers = await db.internal_transfers.find({"ref_item_id": bid, "type": "chicks"}, {"_id": 0}).to_list(1000)
+    egg_cost = egg["total_cost"] if egg else 0
+    exp_total = sum(e["amount"] for e in exps)
+    investment = egg_cost + exp_total
+    revenue = sum(s["total"] for s in sales)
+    transfer_revenue = sum(t["total_value"] for t in transfers)
+    return {"batch": batch, "egg_cost": egg_cost, "expenses_total": exp_total,
+            "total_investment": investment, "sales_revenue": revenue,
+            "transfer_revenue": transfer_revenue, "profit": round(revenue + transfer_revenue - investment, 2)}
+
+# ============ BU3: Farm ============
+@api.get("/farm/stock")
+async def farm_stock(user=Depends(get_user)): return await list_col(db.farm_stock)
+
+@api.get("/farm/sales")
+async def farm_sales(user=Depends(get_user)): return await list_col(db.farm_sales)
+
+@api.post("/farm/sales")
+async def farm_sale(p: FarmSaleIn, user=Depends(get_user)):
+    cust = await db.customers.find_one({"id": p.customer_id})
+    if not cust: raise HTTPException(404, "Customer not found")
+    total = p.quantity * p.unit_price + p.transport - p.discount
+    inv = await gen_invoice("FA")
+    d = {"id": new_id(), "invoice_no": inv, **p.model_dump(),
+         "customer_name": cust["name"], "total": round(total, 2), "created_at": now_iso()}
+    await db.farm_sales.insert_one(d); d.pop('_id', None)
+    # Decrement farm stock FIFO
+    rem = p.quantity
+    stocks = await db.farm_stock.find({"current_count": {"$gt": 0}}).sort("created_at", 1).to_list(1000)
+    for s in stocks:
+        if rem <= 0: break
+        take = min(rem, s["current_count"])
+        await db.farm_stock.update_one({"id": s["id"]}, {"$inc": {"current_count": -take}})
+        rem -= take
+    if p.payment_status != "paid":
+        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": total}})
+    await fin_write(3, "income", "Farm Sale", total, p.date, d["id"], inv, "farm_sale")
+    return d
+
+@api.get("/farm/expenses")
+async def farm_expenses(user=Depends(get_user)): return await list_col(db.farm_expenses)
+
+@api.post("/farm/expenses")
+async def add_farm_expense(p: FarmExpenseIn, user=Depends(get_user)):
+    d = {"id": new_id(), **p.model_dump(), "created_at": now_iso()}
+    await db.farm_expenses.insert_one(d); d.pop('_id', None)
+    await fin_write(3, "expense", p.category, p.amount, p.date, d["id"], "", "farm_expense")
+    return d
+
+# ============ BU4: Water ============
 @api.get("/water/tanks")
-async def list_tanks(user: dict = Depends(get_current_user)):
-    return await list_collection(db.water_tanks)
+async def tanks(user=Depends(get_user)): return await list_col(db.water_tanks)
 
 @api.post("/water/tanks")
-async def create_tank(payload: TankIn, user: dict = Depends(require_roles("super_admin","owner","manager"))):
-    doc = {"id": new_id(), **payload.model_dump(), "created_at": now_iso()}
-    await db.water_tanks.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
+async def create_tank(p: TankIn, user=Depends(get_user)):
+    d = {"id": new_id(), **p.model_dump(), "created_at": now_iso()}
+    await db.water_tanks.insert_one(d); d.pop('_id', None); d.pop("_id", None); return d
 
-@api.post("/water/tanks/{tid}/adjust")
-async def adjust_tank(tid: str, payload: TankAdjustIn, user: dict = Depends(require_roles("super_admin","owner","manager","farm_staff","driver"))):
-    tank = await db.water_tanks.find_one({"id": tid})
-    if not tank:
-        raise HTTPException(status_code=404, detail="Tank not found")
-    new_val = max(0.0, tank["current_liters"] + payload.delta)
-    await db.water_tanks.update_one({"id": tid}, {"$set": {"current_liters": new_val}})
-    await db.water_tank_movements.insert_one({
-        "id": new_id(), "tank_id": tid, "delta": payload.delta,
-        "reason": payload.reason, "ts": now_iso()
-    })
-    return {"id": tid, "current_liters": new_val}
+@api.get("/water/tank-additions")
+async def tank_additions(user=Depends(get_user)): return await list_col(db.water_tank_additions)
 
-@api.delete("/water/tanks/{tid}")
-async def delete_tank(tid: str, user: dict = Depends(require_roles("super_admin","owner"))):
-    await db.water_tanks.delete_one({"id": tid})
-    return {"ok": True}
-
-@api.get("/water/lorries")
-async def list_lorries(user: dict = Depends(get_current_user)):
-    return await list_collection(db.water_lorries)
-
-@api.post("/water/lorries")
-async def create_lorry(payload: LorryIn, user: dict = Depends(require_roles("super_admin","owner","manager"))):
-    doc = {"id": new_id(), **payload.model_dump(), "created_at": now_iso()}
-    await db.water_lorries.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
-
-@api.patch("/water/lorries/{lid}")
-async def update_lorry(lid: str, payload: LorryIn, user: dict = Depends(require_roles("super_admin","owner","manager"))):
-    res = await db.water_lorries.update_one({"id": lid}, {"$set": payload.model_dump()})
-    if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Lorry not found")
-    return await db.water_lorries.find_one({"id": lid}, {"_id": 0})
-
-@api.delete("/water/lorries/{lid}")
-async def delete_lorry(lid: str, user: dict = Depends(require_roles("super_admin","owner"))):
-    await db.water_lorries.delete_one({"id": lid})
-    return {"ok": True}
+@api.post("/water/tank-additions")
+async def add_to_tank(p: TankAddIn, user=Depends(get_user)):
+    tank = await db.water_tanks.find_one({"id": p.tank_id})
+    if not tank: raise HTTPException(404, "Tank not found")
+    await db.water_tanks.update_one({"id": p.tank_id}, {"$inc": {"current_liters": p.liters}})
+    d = {"id": new_id(), **p.model_dump(), "created_at": now_iso()}
+    await db.water_tank_additions.insert_one(d); d.pop('_id', None)
+    if p.loading_charge > 0:
+        await fin_write(4, "expense", "Loading Charge", p.loading_charge, p.date, d["id"], p.source, "tank_addition")
+    return d
 
 @api.get("/water/sales")
-async def list_water_sales(user: dict = Depends(get_current_user)):
-    return await list_collection(db.water_sales)
+async def water_sales(user=Depends(get_user)): return await list_col(db.water_sales)
 
 @api.post("/water/sales")
-async def create_water_sale(payload: WaterSaleIn, user: dict = Depends(require_roles("super_admin","owner","manager","accountant","driver"))):
-    total = payload.liters * payload.rate + payload.delivery
-    count = await db.water_sales.count_documents({}) + 1
-    invoice_no = f"W-{datetime.now().year}-{count:05d}"
-    doc = {"id": new_id(), "invoice_no": invoice_no, **payload.model_dump(),
-           "total": round(total, 2), "created_at": now_iso()}
-    await db.water_sales.insert_one(doc)
-    doc.pop("_id", None)
-    if payload.payment_status != "paid":
-        await db.customers.update_one({"id": payload.customer_id}, {"$inc": {"outstanding": doc["total"]}})
-    await db.finance_transactions.insert_one({
-        "id": new_id(), "type": "income", "category": "water_sale",
-        "amount": doc["total"], "date": payload.date, "source": "water",
-        "ref_id": doc["id"], "notes": invoice_no, "created_at": now_iso()
-    })
-    return doc
+async def water_sale(p: WaterSaleIn, user=Depends(get_user)):
+    cust = await db.customers.find_one({"id": p.customer_id})
+    if not cust: raise HTTPException(404, "Customer not found")
+    total = p.liters * p.rate
+    pending = max(0, total - p.received)
+    d = {"id": new_id(), **p.model_dump(),
+         "customer_name": cust["name"], "total": round(total, 2),
+         "pending": round(pending, 2), "created_at": now_iso()}
+    await db.water_sales.insert_one(d); d.pop('_id', None)
+    # Decrement first tank with stock
+    tanks_ = await db.water_tanks.find({"current_liters": {"$gt": 0}}).sort("created_at", 1).to_list(50)
+    rem = p.liters
+    for t in tanks_:
+        if rem <= 0: break
+        take = min(rem, t["current_liters"])
+        await db.water_tanks.update_one({"id": t["id"]}, {"$inc": {"current_liters": -take}})
+        rem -= take
+    if pending > 0:
+        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": pending}})
+    await fin_write(4, "income", "Water Sale", total, p.date, d["id"], cust["name"], "water_sale")
+    return d
 
 @api.get("/water/expenses")
-async def list_water_expenses(user: dict = Depends(get_current_user)):
-    return await list_collection(db.water_expenses)
+async def water_expenses(user=Depends(get_user)): return await list_col(db.water_expenses)
 
 @api.post("/water/expenses")
-async def create_water_expense(payload: ExpenseIn, user: dict = Depends(require_roles("super_admin","owner","manager","accountant","driver"))):
-    doc = {"id": new_id(), **payload.model_dump(), "created_at": now_iso()}
-    await db.water_expenses.insert_one(doc)
-    doc.pop("_id", None)
-    await db.finance_transactions.insert_one({
-        "id": new_id(), "type": "expense", "category": payload.category,
-        "amount": payload.amount, "date": payload.date, "source": "water",
-        "ref_id": doc["id"], "notes": payload.notes, "created_at": now_iso()
-    })
-    return doc
+async def add_water_expense(p: WaterExpenseIn, user=Depends(get_user)):
+    d = {"id": new_id(), **p.model_dump(), "created_at": now_iso()}
+    await db.water_expenses.insert_one(d); d.pop('_id', None)
+    await fin_write(4, "expense", p.category, p.amount, p.date, d["id"], "", "water_expense")
+    return d
 
-# -------------------- Inventory --------------------
-@api.get("/inventory/items")
-async def list_inventory(user: dict = Depends(get_current_user)):
-    return await list_collection(db.inventory_items)
-
-@api.post("/inventory/items")
-async def create_inventory_item(payload: InventoryItemIn, user: dict = Depends(require_roles("super_admin","owner","manager","farm_staff"))):
-    doc = {"id": new_id(), **payload.model_dump(), "created_at": now_iso()}
-    await db.inventory_items.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
-
-@api.patch("/inventory/items/{iid}")
-async def update_inventory_item(iid: str, payload: InventoryItemIn, user: dict = Depends(require_roles("super_admin","owner","manager"))):
-    res = await db.inventory_items.update_one({"id": iid}, {"$set": payload.model_dump()})
-    if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Item not found")
-    return await db.inventory_items.find_one({"id": iid}, {"_id": 0})
-
-@api.delete("/inventory/items/{iid}")
-async def delete_inventory_item(iid: str, user: dict = Depends(require_roles("super_admin","owner"))):
-    await db.inventory_items.delete_one({"id": iid})
-    return {"ok": True}
-
-@api.post("/inventory/move")
-async def move_stock(payload: StockMoveIn, user: dict = Depends(require_roles("super_admin","owner","manager","farm_staff"))):
-    item = await db.inventory_items.find_one({"id": payload.item_id})
-    if not item:
-        raise HTTPException(status_code=404, detail="Item not found")
-    qty = payload.quantity
-    if payload.type == "in":
-        new_stock = item["stock"] + qty
-    elif payload.type == "out":
-        new_stock = max(0.0, item["stock"] - qty)
-    else:  # adjust
-        new_stock = qty
-    await db.inventory_items.update_one({"id": payload.item_id}, {"$set": {"stock": new_stock}})
-    move = {"id": new_id(), **payload.model_dump(), "prev_stock": item["stock"],
-            "new_stock": new_stock, "ts": now_iso()}
-    await db.inventory_movements.insert_one(move)
-    move.pop("_id", None)
-    return move
-
-@api.get("/inventory/movements")
-async def list_movements(user: dict = Depends(get_current_user)):
-    return await list_collection(db.inventory_movements)
-
-# -------------------- Payments --------------------
+# ============ Payments ============
 @api.get("/payments")
-async def list_payments(user: dict = Depends(get_current_user)):
-    return await list_collection(db.payments)
+async def payments(user=Depends(get_user)): return await list_col(db.payments)
 
 @api.post("/payments")
-async def record_payment(payload: PaymentIn, user: dict = Depends(require_roles("super_admin","owner","manager","accountant"))):
-    doc = {"id": new_id(), **payload.model_dump(), "created_at": now_iso()}
-    await db.payments.insert_one(doc)
-    doc.pop("_id", None)
-    await db.customers.update_one({"id": payload.customer_id}, {"$inc": {"outstanding": -payload.amount}})
-    await db.finance_transactions.insert_one({
-        "id": new_id(), "type": "income", "category": "payment_received",
-        "amount": payload.amount, "date": payload.date, "source": "payment",
-        "ref_id": doc["id"], "notes": payload.notes, "created_at": now_iso()
-    })
-    return doc
+async def record_payment(p: PaymentIn, user=Depends(get_user)):
+    coll = db.customers if p.party_type == "customer" else db.suppliers
+    party = await coll.find_one({"id": p.party_id})
+    if not party: raise HTTPException(404, "Party not found")
+    d = {"id": new_id(), **p.model_dump(), "party_name": party["name"], "created_at": now_iso()}
+    await db.payments.insert_one(d); d.pop('_id', None)
+    await coll.update_one({"id": p.party_id}, {"$inc": {"outstanding": -p.amount}})
+    if p.party_type == "customer":
+        await fin_write(p.business_unit, "income", "Payment Received", p.amount, p.date, d["id"], party["name"], "payment")
+    else:
+        await fin_write(p.business_unit, "expense", "Supplier Payment (paid)", 0, p.date, d["id"], party["name"], "supplier_payment")
+        # Note: supplier payment reduces outstanding only; original expense was already booked at purchase
+    return d
 
-# -------------------- Finance --------------------
+# ============ Internal Transfers list ============
+@api.get("/transfers")
+async def transfers(user=Depends(get_user)): return await list_col(db.internal_transfers)
+
+# ============ Finance / Reports ============
 @api.get("/finance/transactions")
-async def list_transactions(user: dict = Depends(get_current_user)):
-    return await list_collection(db.finance_transactions, limit=2000)
+async def fin_tx(user=Depends(get_user), bu: Optional[int] = None, month: Optional[str] = None):
+    q = {}
+    if bu: q["business_unit"] = bu
+    if month: q["date"] = {"$regex": f"^{month}"}
+    return await list_col(db.finance_transactions, q, limit=5000)
 
 @api.get("/finance/pnl")
-async def pnl(user: dict = Depends(get_current_user), month: Optional[str] = None):
-    # month format: YYYY-MM
-    q: Dict[str, Any] = {}
-    if month:
-        q["date"] = {"$regex": f"^{month}"}
-    txs = await db.finance_transactions.find(q, {"_id": 0}).to_list(5000)
+async def pnl(user=Depends(get_user), bu: Optional[int] = None, month: Optional[str] = None):
+    q = {}
+    if bu: q["business_unit"] = bu
+    if month: q["date"] = {"$regex": f"^{month}"}
+    txs = await db.finance_transactions.find(q, {"_id": 0}).to_list(10000)
     income = sum(t["amount"] for t in txs if t["type"] == "income")
     expense = sum(t["amount"] for t in txs if t["type"] == "expense")
     by_cat: Dict[str, float] = {}
@@ -548,99 +481,84 @@ async def pnl(user: dict = Depends(get_current_user), month: Optional[str] = Non
     return {"income": round(income, 2), "expense": round(expense, 2),
             "profit": round(income - expense, 2), "expense_by_category": by_cat}
 
-# -------------------- Dashboard --------------------
+# ============ Dashboard ============
 @api.get("/dashboard/summary")
-async def dashboard_summary(user: dict = Depends(get_current_user)):
+async def dashboard(user=Depends(get_user)):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     month = datetime.now(timezone.utc).strftime("%Y-%m")
+    txs = await db.finance_transactions.find({}, {"_id": 0}).to_list(20000)
 
-    txs = await db.finance_transactions.find({}, {"_id": 0}).to_list(5000)
-    today_sales = sum(t["amount"] for t in txs if t["type"] == "income" and t.get("date","").startswith(today))
-    month_income = sum(t["amount"] for t in txs if t["type"] == "income" and t.get("date","").startswith(month))
-    month_expense = sum(t["amount"] for t in txs if t["type"] == "expense" and t.get("date","").startswith(month))
+    def agg(bu_filter=None):
+        rev = sum(t["amount"] for t in txs if t["type"] == "income" and (bu_filter is None or t["business_unit"] == bu_filter) and t["date"].startswith(month))
+        exp = sum(t["amount"] for t in txs if t["type"] == "expense" and (bu_filter is None or t["business_unit"] == bu_filter) and t["date"].startswith(month))
+        return {"revenue": round(rev, 2), "expense": round(exp, 2), "profit": round(rev - exp, 2)}
+
+    today_total = sum(t["amount"] for t in txs if t["type"] == "income" and t["date"].startswith(today))
+
+    feed_items_data = await db.feed_items.find({}, {"_id": 0}).to_list(500)
+    feed_stock_value = sum(f["current_stock"] * f["weighted_avg_cost"] for f in feed_items_data)
+    low_stock = [f for f in feed_items_data if f["current_stock"] < 100]
 
     customers = await db.customers.find({}, {"_id": 0}).to_list(2000)
     outstanding = sum(c.get("outstanding", 0) for c in customers)
     top_customers = sorted(customers, key=lambda c: c.get("outstanding", 0), reverse=True)[:5]
 
-    inv = await db.inventory_items.find({}, {"_id": 0}).to_list(500)
-    low_stock = [i for i in inv if i.get("threshold", 0) > 0 and i.get("stock", 0) <= i.get("threshold", 0)]
+    active_batches = await db.poultry_batches.count_documents({"status": {"$ne": "closed"}})
+    farm_birds = sum(s["current_count"] for s in await db.farm_stock.find({}, {"_id": 0}).to_list(500))
+    water_stock = sum(t["current_liters"] for t in await db.water_tanks.find({}, {"_id": 0}).to_list(50))
 
-    batches = await db.poultry_batches.find({"status": "active"}, {"_id": 0}).to_list(500)
-    lorries = await db.water_lorries.find({}, {"_id": 0}).to_list(500)
-    tanks = await db.water_tanks.find({}, {"_id": 0}).to_list(500)
-
-    recent_poultry = await db.poultry_sales.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
-    recent_water = await db.water_sales.find({}, {"_id": 0}).sort("created_at", -1).to_list(5)
-
-    # Last 7 days revenue trend
+    # 6-month trend per BU
     trend = []
-    for i in range(6, -1, -1):
-        d = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
-        amt = sum(t["amount"] for t in txs if t["type"] == "income" and t.get("date","").startswith(d))
-        trend.append({"date": d[5:], "revenue": round(amt, 2)})
+    for i in range(5, -1, -1):
+        dt = datetime.now(timezone.utc).replace(day=1) - timedelta(days=i*30)
+        mkey = dt.strftime("%Y-%m")
+        row = {"month": mkey[5:]}
+        for bu in [1, 2, 3, 4]:
+            row[f"bu{bu}"] = round(sum(t["amount"] for t in txs if t["type"] == "income" and t["business_unit"] == bu and t["date"].startswith(mkey)), 2)
+        trend.append(row)
+
+    recent_tx = sorted(txs, key=lambda t: t["created_at"], reverse=True)[:10]
 
     return {
-        "today_sales": round(today_sales, 2),
-        "month_income": round(month_income, 2),
-        "month_expense": round(month_expense, 2),
-        "net_profit": round(month_income - month_expense, 2),
+        "today_total_sales": round(today_total, 2),
+        "combined": agg(),
         "outstanding": round(outstanding, 2),
-        "low_stock_count": len(low_stock),
-        "active_batches": len(batches),
-        "lorries_total": len(lorries),
-        "tanks_total": len(tanks),
+        "bu1": {**agg(1), "feed_items": len(feed_items_data), "stock_value": round(feed_stock_value, 2), "low_stock_count": len(low_stock)},
+        "bu2": {**agg(2), "active_batches": active_batches},
+        "bu3": {**agg(3), "current_birds": farm_birds},
+        "bu4": {**agg(4), "water_stock": round(water_stock, 2)},
         "top_customers": top_customers,
-        "low_stock": low_stock,
-        "recent_poultry_sales": recent_poultry,
-        "recent_water_sales": recent_water,
+        "low_feed_stock": low_stock,
+        "recent_transactions": recent_tx,
         "revenue_trend": trend,
     }
 
-# -------------------- Startup --------------------
+# ============ Startup ============
 app.include_router(api)
+app.add_middleware(CORSMiddleware, allow_credentials=True,
+                   allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS","").split(",") if o.strip()],
+                   allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup():
-    # Indexes
+    for coll in ["users","customers","suppliers","feed_items","feed_purchases","feed_sales",
+                 "egg_purchases","poultry_batches","batch_expenses","chick_sales",
+                 "farm_stock","farm_sales","farm_expenses","water_tanks","water_tank_additions",
+                 "water_sales","water_expenses","internal_transfers","payments","finance_transactions"]:
+        await db[coll].create_index("id", unique=True, sparse=True)
     await db.users.create_index("email", unique=True)
-    await db.users.create_index("id", unique=True)
-    await db.customers.create_index("id", unique=True)
-    await db.poultry_batches.create_index("id", unique=True)
-    await db.poultry_sales.create_index("id", unique=True)
-    await db.water_tanks.create_index("id", unique=True)
-    await db.water_lorries.create_index("id", unique=True)
-    await db.water_sales.create_index("id", unique=True)
-    await db.inventory_items.create_index("id", unique=True)
-    await db.finance_transactions.create_index("date")
+    await db.finance_transactions.create_index([("date", 1), ("business_unit", 1)])
 
-    # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@agribiz.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})
-    if existing is None:
-        await db.users.insert_one({
-            "id": new_id(), "email": admin_email,
-            "password_hash": hash_password(admin_password),
-            "name": "Admin", "role": "super_admin",
-            "phone": "", "status": "active", "created_at": now_iso(),
-        })
-        logger.info(f"Seeded admin user: {admin_email}")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one({"email": admin_email},
-                                  {"$set": {"password_hash": hash_password(admin_password)}})
-
-@app.on_event("shutdown")
-async def shutdown():
-    client.close()
+    if not existing:
+        await db.users.insert_one({"id": new_id(), "email": admin_email,
+            "password_hash": hp(admin_password), "name": "Admin", "role": "admin",
+            "created_at": now_iso()})
+        logger.info(f"Seeded admin: {admin_email}")
+    elif not vp(admin_password, existing["password_hash"]):
+        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hp(admin_password)}})
