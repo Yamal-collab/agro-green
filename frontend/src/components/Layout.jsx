@@ -2,16 +2,19 @@ import React from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
-  LayoutDashboard, Users, Egg, Droplets, Package, Wallet, LogOut, Leaf
+  LayoutDashboard, Users, Wheat, Egg, Bird, Droplets, ArrowLeftRight, Truck, LogOut, Leaf
 } from "lucide-react";
 
 const NAV = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
   { to: "/customers", label: "Customers", icon: Users, testid: "nav-customers" },
-  { to: "/poultry", label: "Poultry", icon: Egg, testid: "nav-poultry" },
+  { to: "/suppliers", label: "Suppliers", icon: Truck, testid: "nav-suppliers" },
+  { to: "/feed", label: "Feed Trading", icon: Wheat, testid: "nav-feed" },
+  { to: "/hatchery", label: "Egg Hatchery", icon: Egg, testid: "nav-hatchery" },
+  { to: "/farm", label: "Own Farm", icon: Bird, testid: "nav-farm" },
   { to: "/water", label: "Water", icon: Droplets, testid: "nav-water" },
-  { to: "/inventory", label: "Inventory", icon: Package, testid: "nav-inventory" },
-  { to: "/finance", label: "Finance", icon: Wallet, testid: "nav-finance" },
+  { to: "/transfers", label: "Internal Transfers", icon: ArrowLeftRight, testid: "nav-transfers" },
+  { to: "/finance", label: "Finance", icon: LayoutDashboard, testid: "nav-finance" },
 ];
 
 export default function Layout() {
