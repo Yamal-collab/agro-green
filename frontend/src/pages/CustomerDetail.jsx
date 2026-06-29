@@ -12,8 +12,8 @@ const BU_COLOR = { 1: "#14532D", 2: "#CA8A04", 3: "#15803D", 4: "#0284C7" };
 const SALE_TYPE = { feed_sales: "feed", chick_sales: "chick", farm_sales: "farm", water_sales: "water" };
 const statusBadge = (s) =>
   s === "paid" ? "bg-[#15803D]/10 text-[#15803D]"
-  : s === "partial" ? "bg-[#CA8A04]/10 text-[#CA8A04]"
-  : "bg-[#C2410C]/10 text-[#C2410C]";
+    : s === "partial" ? "bg-[#CA8A04]/10 text-[#CA8A04]"
+      : "bg-[#C2410C]/10 text-[#C2410C]";
 
 const TABS = [
   { value: "summary", label: "Summary" },
@@ -47,8 +47,15 @@ export default function CustomerDetail() {
 
   const customer = details.data?.customer;
   const summary = details.data?.summary;
-  const invoices = details.data?.invoices || [];
-  const payments = details.data?.payments || [];
+  const invoices = useMemo(
+    () => details.data?.invoices ?? [],
+    [details.data?.invoices]
+  );
+
+  const payments = useMemo(
+    () => details.data?.payments ?? [],
+    [details.data?.payments]
+  );
   const ledgerData = ledger.data;
 
   const lastPurchase = useMemo(() =>
@@ -140,9 +147,8 @@ export default function CustomerDetail() {
       <div className="flex gap-1 mb-6 border-b border-border overflow-x-auto" data-testid="customer-tabs">
         {TABS.map((t) => (
           <button key={t.value} data-testid={`tab-${t.value}`} onClick={() => setTab(t.value)}
-            className={`px-4 py-2 text-sm font-semibold border-b-2 -mb-px whitespace-nowrap ${
-              tab === t.value ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}>
+            className={`px-4 py-2 text-sm font-semibold border-b-2 -mb-px whitespace-nowrap ${tab === t.value ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}>
             {t.label}
           </button>
         ))}

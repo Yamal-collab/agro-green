@@ -49,7 +49,10 @@ export default function Reports() {
 
   const data = exec.data;
   const totals = data?.totals || { revenue: 0, expenses: 0, profit: 0, outstanding: 0, stock_value: 0 };
-  const perBu = data?.per_bu || {};
+  const perBu = useMemo(
+  () => data?.per_bu ?? {},
+  [data?.per_bu]
+);
 
   const revByBu = useMemo(() => Object.entries(perBu).map(([k, v]) => ({
     name: v.label, revenue: v.revenue, color: BU_INFO[k]?.color,
