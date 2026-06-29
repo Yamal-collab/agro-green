@@ -7,6 +7,7 @@ import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
 import Customers from "@/pages/Customers";
+import CustomerDetail from "@/pages/CustomerDetail";
 import Suppliers from "@/pages/Suppliers";
 import Feed from "@/pages/Feed";
 import Hatchery from "@/pages/Hatchery";
@@ -27,6 +28,7 @@ function App() {
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/customers" element={<Customers />} />
+            <Route path="/customers/:id" element={<CustomerDetail />} />
             <Route path="/suppliers" element={<Suppliers />} />
             <Route path="/feed" element={<Feed />} />
             <Route path="/hatchery" element={<Hatchery />} />

@@ -2,348 +2,294 @@ import React, { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import api from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
-import { TrendingUp, TrendingDown, Wallet, AlertTriangle, Users, Truck, Droplets } from "lucide-react";
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
+import {
+  Wheat, Egg, Bird, Droplets,
+  TrendingUp, TrendingDown, Wallet, AlertTriangle, Package,
+} from "lucide-react";
+import {
+  ResponsiveContainer, BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+} from "recharts";
 
-const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
-const COLORS = ["#14532D", "#0284C7", "#CA8A04", "#C2410C", "#15803D", "#475569", "#7C3AED", "#DB2777"];
-const LEGEND_STYLE = { fontSize: 11 };
+const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+const compactCurrency = (n) => {
+  const v = Number(n || 0);
+  if (Math.abs(v) >= 10000000) return `₹${(v / 10000000).toFixed(1)}Cr`;
+  if (Math.abs(v) >= 100000) return `₹${(v / 100000).toFixed(1)}L`;
+  if (Math.abs(v) >= 1000) return `₹${(v / 1000).toFixed(1)}K`;
+  return `₹${v.toFixed(0)}`;
+};
 
-const BU_TABS = [
-  { value: "all", label: "All BUs", bu: null },
-  { value: "1", label: "Feed (BU1)", bu: 1 },
-  { value: "2", label: "Hatchery (BU2)", bu: 2 },
-  { value: "3", label: "Farm (BU3)", bu: 3 },
-  { value: "4", label: "Water (BU4)", bu: 4 },
-];
+const BU_INFO = {
+  bu1: { label: "Feed Trading", icon: Wheat, color: "#14532D" },
+  bu2: { label: "Egg Hatchery", icon: Egg, color: "#CA8A04" },
+  bu3: { label: "Own Farm", icon: Bird, color: "#15803D" },
+  bu4: { label: "Water", icon: Droplets, color: "#0284C7" },
+};
 
-const PERIODS = [
-  { value: "daily", label: "Daily" },
-  { value: "monthly", label: "Monthly" },
-  { value: "yearly", label: "Yearly" },
-];
-
-function periodToMonthFilter(period, date) {
-  // Backend pnl supports `month` as a regex prefix of the date string (YYYY, YYYY-MM, or YYYY-MM-DD)
-  if (!date) return "";
-  if (period === "yearly") return date.slice(0, 4);
-  if (period === "monthly") return date.slice(0, 7);
-  return date; // daily — full YYYY-MM-DD
-}
+const PIE_COLORS = ["#14532D", "#CA8A04", "#15803D", "#0284C7", "#C2410C", "#7C3AED", "#DB2777", "#475569"];
 
 export default function Reports() {
   const today = new Date().toISOString().slice(0, 10);
-  const [tab, setTab] = useState("all");
-  const [period, setPeriod] = useState("monthly");
-  const [date, setDate] = useState(today);
+  const firstOfMonth = today.slice(0, 8) + "01";
+  const [dfrom, setDfrom] = useState(firstOfMonth);
+  const [dto, setDto] = useState(today);
 
-  const currentTab = BU_TABS.find((t) => t.value === tab) || BU_TABS[0];
-  const monthFilter = periodToMonthFilter(period, date);
+  const params = useMemo(() => {
+    const p = new URLSearchParams();
+    if (dfrom) p.set("dfrom", dfrom);
+    if (dto) p.set("dto", dto);
+    return p.toString();
+  }, [dfrom, dto]);
 
-  const pnlKey = ["reports-pnl", currentTab.bu, monthFilter];
-  const pnl = useQuery({
-    queryKey: pnlKey,
-    queryFn: async () => {
-      const params = new URLSearchParams();
-      if (currentTab.bu) params.set("bu", currentTab.bu);
-      if (monthFilter) params.set("month", monthFilter);
-      const qs = params.toString();
-      return (await api.get(`/finance/pnl${qs ? "?" + qs : ""}`)).data;
-    },
+  const exec = useQuery({
+    queryKey: ["exec-dashboard", dfrom, dto],
+    queryFn: async () => (await api.get(`/reports/exec-dashboard?${params}`)).data,
   });
 
-  const outstanding = useQuery({
-    queryKey: ["reports-outstanding"],
-    queryFn: async () => (await api.get("/reports/outstanding")).data,
-  });
+  const data = exec.data;
+  const totals = data?.totals || { revenue: 0, expenses: 0, profit: 0, outstanding: 0, stock_value: 0 };
+  const perBu = data?.per_bu || {};
 
-  const lowStock = useQuery({
-    queryKey: ["reports-low-stock"],
-    queryFn: async () => (await api.get("/reports/low-stock")).data,
-    enabled: currentTab.bu === 1 || currentTab.bu === null,
-  });
+  const revByBu = useMemo(() => Object.entries(perBu).map(([k, v]) => ({
+    name: v.label, revenue: v.revenue, color: BU_INFO[k]?.color,
+  })), [perBu]);
 
-  const waterSales = useQuery({
-    queryKey: ["reports-water-sales"],
-    queryFn: async () => (await api.get("/water/sales")).data,
-    enabled: currentTab.bu === 4 || currentTab.bu === null,
-  });
+  const profitByBu = useMemo(() => Object.entries(perBu).map(([k, v]) => ({
+    name: v.label, revenue: v.revenue, expenses: v.expenses, profit: v.profit, color: BU_INFO[k]?.color,
+  })), [perBu]);
 
-  const expenseData = useMemo(
-    () => Object.entries(pnl.data?.expense_by_category || {}).map(([name, value]) => ({ name, value })),
-    [pnl.data]
-  );
+  const outByBu = useMemo(() => Object.entries(perBu).map(([k, v]) => ({
+    name: v.label, outstanding: v.outstanding, color: BU_INFO[k]?.color,
+  })), [perBu]);
 
-  const pendingWaterSales = useMemo(
-    () => (waterSales.data || []).filter((s) => Number(s.pending || 0) > 0),
-    [waterSales.data]
-  );
-
-  const dateInputType = period === "yearly" ? "number" : period === "monthly" ? "month" : "date";
-  const dateInputValue =
-    period === "yearly" ? date.slice(0, 4) : period === "monthly" ? date.slice(0, 7) : date;
-
-  const handleDateChange = (val) => {
-    if (period === "yearly") {
-      setDate(`${val}-01-01`);
-    } else if (period === "monthly") {
-      setDate(`${val}-01`);
-    } else {
-      setDate(val);
-    }
-  };
+  const trend = data?.monthly_trend || [];
+  const expenseBreakdown = data?.expense_breakdown || [];
 
   return (
     <div data-testid="reports-page">
       <PageHeader
-        title="Reports"
-        subtitle="P&L, expense breakdown, outstanding balances and stock alerts"
-        action={
-          <div className="flex gap-2 items-center">
-            <select
-              data-testid="report-period"
-              value={period}
-              onChange={(e) => setPeriod(e.target.value)}
-              className="rounded-md border border-border bg-white px-3 py-2 text-sm capitalize"
-            >
-              {PERIODS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
-              ))}
-            </select>
-            <input
-              data-testid="report-date"
-              type={dateInputType}
-              value={dateInputValue}
-              min={dateInputType === "number" ? 2000 : undefined}
-              max={dateInputType === "number" ? 2100 : undefined}
-              onChange={(e) => handleDateChange(e.target.value)}
-              className="rounded-md border border-border bg-white px-3 py-2 text-sm"
-            />
-          </div>
-        }
+        title="Executive Dashboard"
+        subtitle="High-level business analytics across all units"
       />
 
-      {/* BU Tabs */}
-      <div className="flex gap-1 mb-6 border-b border-border overflow-x-auto" data-testid="report-bu-tabs">
-        {BU_TABS.map((t) => (
+      {/* Date filter */}
+      <div className="bg-white border border-border rounded-md p-3 mb-6 flex flex-wrap gap-3 items-center" data-testid="report-filters">
+        <div className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">Period</div>
+        <input
+          type="date" data-testid="filter-dfrom" value={dfrom} onChange={(e) => setDfrom(e.target.value)}
+          className="rounded-md border border-border bg-white px-3 py-1.5 text-sm"
+        />
+        <span className="text-muted-foreground text-sm">to</span>
+        <input
+          type="date" data-testid="filter-dto" value={dto} onChange={(e) => setDto(e.target.value)}
+          className="rounded-md border border-border bg-white px-3 py-1.5 text-sm"
+        />
+        {(dfrom !== firstOfMonth || dto !== today) && (
           <button
-            key={t.value}
-            data-testid={`tab-bu-${t.value}`}
-            onClick={() => setTab(t.value)}
-            className={`px-4 py-2 text-sm font-semibold border-b-2 -mb-px whitespace-nowrap ${
-              tab === t.value ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t.label}
-          </button>
+            data-testid="filter-reset"
+            onClick={() => { setDfrom(firstOfMonth); setDto(today); }}
+            className="text-xs text-muted-foreground hover:text-primary underline"
+          >Reset to this month</button>
+        )}
+        <div className="ml-auto text-xs text-muted-foreground">
+          Showing <span className="font-semibold text-foreground">{dfrom || "Start"}</span> → <span className="font-semibold text-foreground">{dto || "Today"}</span>
+        </div>
+      </div>
+
+      {/* Top KPIs */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6" data-testid="exec-kpis">
+        <Kpi icon={TrendingUp} label="Revenue" value={currency(totals.revenue)} color="#15803D" testid="kpi-revenue" />
+        <Kpi icon={TrendingDown} label="Expenses" value={currency(totals.expenses)} color="#C2410C" testid="kpi-expenses" />
+        <Kpi icon={Wallet} label="Profit"
+             value={currency(totals.profit)}
+             color={totals.profit >= 0 ? "#15803D" : "#C2410C"}
+             testid="kpi-profit" />
+        <Kpi icon={AlertTriangle} label="Outstanding" value={currency(totals.outstanding)} color="#CA8A04" testid="kpi-outstanding" />
+        <Kpi icon={Package} label="Stock Value" value={currency(totals.stock_value)} color="#0284C7" testid="kpi-stock" />
+      </div>
+
+      {/* BU Cards */}
+      <h3 className="text-base font-bold mb-3" style={{ fontFamily: "var(--font-heading)" }}>Business Units</h3>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8" data-testid="exec-bu-cards">
+        {Object.entries(perBu).map(([k, v]) => (
+          <BuCard key={k} buKey={k} data={v} />
         ))}
       </div>
 
-      {/* P&L cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6" data-testid="pnl-cards">
-        <div className="bg-white border border-border rounded-lg p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <TrendingUp className="h-4 w-4 text-[#15803D]" />
-            <div className="kpi-label">Income</div>
-          </div>
-          <div className="kpi-value" style={{ color: "#15803D" }} data-testid="pnl-income">
-            {currency(pnl.data?.income)}
-          </div>
-        </div>
-        <div className="bg-white border border-border rounded-lg p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <TrendingDown className="h-4 w-4 text-[#C2410C]" />
-            <div className="kpi-label">Expense</div>
-          </div>
-          <div className="kpi-value" style={{ color: "#C2410C" }} data-testid="pnl-expense">
-            {currency(pnl.data?.expense)}
-          </div>
-        </div>
-        <div className="bg-white border border-border rounded-lg p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <Wallet className="h-4 w-4 text-primary" />
-            <div className="kpi-label">Profit</div>
-          </div>
-          <div className="kpi-value" data-testid="pnl-profit">{currency(pnl.data?.profit)}</div>
-        </div>
+      {/* Charts row 1 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <Card title="Revenue by Business Unit">
+          {revByBu.every(r => !r.revenue) ? (
+            <EmptyChart />
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={revByBu} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={compactCurrency} />
+                <Tooltip formatter={(v) => currency(v)} />
+                <Bar dataKey="revenue" radius={[6, 6, 0, 0]}>
+                  {revByBu.map((entry, idx) => <Cell key={entry.name} fill={entry.color || PIE_COLORS[idx % PIE_COLORS.length]} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
+
+        <Card title="Monthly Revenue Trend (last 6 months)">
+          {trend.every(t => !t.revenue && !t.expenses) ? (
+            <EmptyChart />
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <LineChart data={trend} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={compactCurrency} />
+                <Tooltip formatter={(v) => currency(v)} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Line type="monotone" dataKey="revenue" stroke="#15803D" strokeWidth={2.5} dot={{ r: 3 }} />
+                <Line type="monotone" dataKey="expenses" stroke="#C2410C" strokeWidth={2.5} dot={{ r: 3 }} />
+                <Line type="monotone" dataKey="profit" stroke="#0284C7" strokeWidth={2.5} dot={{ r: 3 }} strokeDasharray="4 4" />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
       </div>
 
-      {/* Expense pie */}
-      <div className="bg-white border border-border rounded-lg p-5 mb-6">
-        <h3 className="text-base font-bold mb-3" style={{ fontFamily: "var(--font-heading)" }}>
-          Expense Breakdown {currentTab.bu ? `— ${currentTab.label}` : ""}
-        </h3>
-        {expenseData.length === 0 ? (
-          <div className="h-[240px] flex items-center justify-center text-sm text-muted-foreground">
-            No expenses for selected period
-          </div>
-        ) : (
-          <ResponsiveContainer width="100%" height={260}>
-            <PieChart>
-              <Pie data={expenseData} dataKey="value" nameKey="name" outerRadius={90} label>
-                {expenseData.map((entry, idx) => (
-                  <Cell key={entry.name} fill={COLORS[idx % COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip formatter={(v) => currency(v)} />
-              <Legend wrapperStyle={LEGEND_STYLE} />
-            </PieChart>
-          </ResponsiveContainer>
-        )}
+      {/* Charts row 2 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <Card title="Expense Breakdown">
+          {expenseBreakdown.length === 0 ? (
+            <EmptyChart message="No expenses in this period" />
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <PieChart>
+                <Pie
+                  data={expenseBreakdown} dataKey="amount" nameKey="category"
+                  outerRadius={90} label={(d) => `${d.category}: ${compactCurrency(d.amount)}`}
+                  labelLine={false}
+                >
+                  {expenseBreakdown.map((entry, idx) => (
+                    <Cell key={entry.category} fill={PIE_COLORS[idx % PIE_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip formatter={(v) => currency(v)} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
+
+        <Card title="Profit Comparison by Business Unit">
+          {profitByBu.every(r => !r.revenue && !r.expenses) ? (
+            <EmptyChart />
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <BarChart data={profitByBu} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={compactCurrency} />
+                <Tooltip formatter={(v) => currency(v)} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="revenue" fill="#15803D" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="expenses" fill="#C2410C" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="profit" fill="#0284C7" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
       </div>
 
-      {/* Outstanding tables */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-        <div className="bg-white border border-border rounded-lg overflow-hidden" data-testid="customers-outstanding">
-          <div className="px-5 py-3 border-b border-border flex items-center gap-2">
-            <Users className="h-4 w-4 text-primary" />
-            <h3 className="font-bold text-base" style={{ fontFamily: "var(--font-heading)" }}>
-              Customer Receivables
-            </h3>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {(outstanding.data?.customers || []).length} parties
-            </span>
-          </div>
-          <table className="w-full text-sm">
-            <thead className="bg-secondary text-muted-foreground">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left py-2 px-4">Name</th>
-                <th className="text-left">Phone</th>
-                <th className="text-right px-4">Outstanding</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(outstanding.data?.customers || []).map((c) => (
-                <tr key={c.id} className="border-t border-border hover:bg-background/60">
-                  <td className="py-2 px-4 font-medium">{c.name}</td>
-                  <td className="text-xs text-muted-foreground">{c.phone || "—"}</td>
-                  <td className="text-right px-4 font-semibold text-[#C2410C]">{currency(c.outstanding)}</td>
-                </tr>
-              ))}
-              {(outstanding.data?.customers || []).length === 0 && (
-                <tr><td colSpan={3} className="py-8 text-center text-sm text-muted-foreground">No receivables</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+      {/* Charts row 3 */}
+      <div className="grid grid-cols-1 gap-4">
+        <Card title="Outstanding by Business Unit">
+          {outByBu.every(r => !r.outstanding) ? (
+            <EmptyChart message="No outstanding dues" />
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={outByBu} layout="vertical" margin={{ top: 10, right: 16, left: 30, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={compactCurrency} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={100} />
+                <Tooltip formatter={(v) => currency(v)} />
+                <Bar dataKey="outstanding" radius={[0, 6, 6, 0]}>
+                  {outByBu.map((entry, idx) => <Cell key={entry.name} fill={entry.color || PIE_COLORS[idx % PIE_COLORS.length]} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </Card>
+      </div>
+    </div>
+  );
+}
 
-        <div className="bg-white border border-border rounded-lg overflow-hidden" data-testid="suppliers-outstanding">
-          <div className="px-5 py-3 border-b border-border flex items-center gap-2">
-            <Truck className="h-4 w-4 text-primary" />
-            <h3 className="font-bold text-base" style={{ fontFamily: "var(--font-heading)" }}>
-              Supplier Payables
-            </h3>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {(outstanding.data?.suppliers || []).length} parties
-            </span>
-          </div>
-          <table className="w-full text-sm">
-            <thead className="bg-secondary text-muted-foreground">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left py-2 px-4">Name</th>
-                <th className="text-left">Phone</th>
-                <th className="text-right px-4">Payable</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(outstanding.data?.suppliers || []).map((s) => (
-                <tr key={s.id} className="border-t border-border hover:bg-background/60">
-                  <td className="py-2 px-4 font-medium">{s.name}</td>
-                  <td className="text-xs text-muted-foreground">{s.phone || "—"}</td>
-                  <td className="text-right px-4 font-semibold text-[#C2410C]">{currency(s.outstanding)}</td>
-                </tr>
-              ))}
-              {(outstanding.data?.suppliers || []).length === 0 && (
-                <tr><td colSpan={3} className="py-8 text-center text-sm text-muted-foreground">No payables</td></tr>
-              )}
-            </tbody>
-          </table>
+function Kpi({ icon: Icon, label, value, color, testid }) {
+  return (
+    <div className="bg-white border border-border rounded-lg p-4" data-testid={testid}>
+      <div className="flex items-center gap-2 mb-2">
+        <Icon className="h-4 w-4" style={{ color }} />
+        <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</div>
+      </div>
+      <div className="text-2xl font-bold" style={{ color, fontFamily: "var(--font-heading)" }}>{value}</div>
+    </div>
+  );
+}
+
+function BuCard({ buKey, data }) {
+  const info = BU_INFO[buKey] || { label: data.label, icon: Package, color: "#475569" };
+  const Icon = info.icon;
+  const profitPositive = data.profit >= 0;
+  return (
+    <div className="bg-white border border-border rounded-lg overflow-hidden" data-testid={`bu-card-${buKey}`}>
+      <div className="px-4 py-3 border-b border-border flex items-center gap-2"
+           style={{ background: `${info.color}10` }}>
+        <Icon className="h-5 w-5" style={{ color: info.color }} />
+        <div>
+          <div className="font-bold text-sm" style={{ color: info.color, fontFamily: "var(--font-heading)" }}>{info.label}</div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{data.sales_count} sales</div>
         </div>
       </div>
+      <div className="p-4 space-y-2 text-sm">
+        <Row label="Revenue" value={currency(data.revenue)} color="#15803D" />
+        <Row label="Expenses" value={currency(data.expenses)} color="#C2410C" />
+        <Row label="Profit" value={currency(data.profit)} color={profitPositive ? "#15803D" : "#C2410C"} bold />
+        <Row label="Outstanding" value={currency(data.outstanding)} color="#CA8A04" />
+        <Row
+          label="Stock"
+          value={data.stock_value > 0
+            ? currency(data.stock_value)
+            : `${Number(data.stock_units || 0).toLocaleString("en-IN")} ${data.stock_unit_label}`}
+          color="#0284C7"
+        />
+      </div>
+    </div>
+  );
+}
 
-      {/* Low stock — BU1 only */}
-      {(currentTab.bu === 1 || currentTab.bu === null) && (
-        <div className="bg-white border border-border rounded-lg overflow-hidden mb-6" data-testid="low-stock-table">
-          <div className="px-5 py-3 border-b border-border flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4 text-[#C2410C]" />
-            <h3 className="font-bold text-base" style={{ fontFamily: "var(--font-heading)" }}>
-              Low Feed Stock (&lt; 100)
-            </h3>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {(lowStock.data || []).length} items
-            </span>
-          </div>
-          <table className="w-full text-sm">
-            <thead className="bg-secondary text-muted-foreground">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left py-2 px-4">Name</th>
-                <th className="text-left">Brand</th>
-                <th className="text-left">Category</th>
-                <th className="text-right">Stock</th>
-                <th className="text-right px-4">Avg Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(lowStock.data || []).map((f) => (
-                <tr key={f.id} className="border-t border-border hover:bg-background/60">
-                  <td className="py-2 px-4 font-medium">{f.name}</td>
-                  <td className="text-muted-foreground">{f.brand || "—"}</td>
-                  <td className="text-muted-foreground capitalize">{f.category || "—"}</td>
-                  <td className="text-right font-semibold text-[#C2410C]">
-                    {Number(f.current_stock || 0).toFixed(2)} {f.unit || ""}
-                  </td>
-                  <td className="text-right px-4">{currency(f.weighted_avg_cost)}</td>
-                </tr>
-              ))}
-              {(lowStock.data || []).length === 0 && (
-                <tr><td colSpan={5} className="py-8 text-center text-sm text-muted-foreground">All feed items above threshold</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
+function Row({ label, value, color, bold }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={bold ? "font-bold" : "font-semibold"} style={{ color }}>{value}</span>
+    </div>
+  );
+}
 
-      {/* Pending water sales — BU4 only */}
-      {(currentTab.bu === 4 || currentTab.bu === null) && (
-        <div className="bg-white border border-border rounded-lg overflow-hidden mb-6" data-testid="water-pending-table">
-          <div className="px-5 py-3 border-b border-border flex items-center gap-2">
-            <Droplets className="h-4 w-4 text-primary" />
-            <h3 className="font-bold text-base" style={{ fontFamily: "var(--font-heading)" }}>
-              Customer Pending Water Sales
-            </h3>
-            <span className="ml-auto text-xs text-muted-foreground">
-              {pendingWaterSales.length} sales
-            </span>
-          </div>
-          <table className="w-full text-sm">
-            <thead className="bg-secondary text-muted-foreground">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left py-2 px-4">Date</th>
-                <th className="text-left">Customer</th>
-                <th className="text-right">Liters</th>
-                <th className="text-right">Total</th>
-                <th className="text-right">Received</th>
-                <th className="text-right px-4">Pending</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pendingWaterSales.map((s) => (
-                <tr key={s.id} className="border-t border-border hover:bg-background/60">
-                  <td className="py-2 px-4 text-xs">{s.date}</td>
-                  <td className="font-medium">{s.customer_name}</td>
-                  <td className="text-right">{Number(s.liters || 0).toLocaleString("en-IN")}</td>
-                  <td className="text-right">{currency(s.total)}</td>
-                  <td className="text-right text-[#15803D]">{currency(s.received)}</td>
-                  <td className="text-right px-4 font-semibold text-[#C2410C]">{currency(s.pending)}</td>
-                </tr>
-              ))}
-              {pendingWaterSales.length === 0 && (
-                <tr><td colSpan={6} className="py-8 text-center text-sm text-muted-foreground">No pending water sales</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
+function Card({ title, children }) {
+  return (
+    <div className="bg-white border border-border rounded-lg p-5">
+      <h3 className="text-base font-bold mb-3" style={{ fontFamily: "var(--font-heading)" }}>{title}</h3>
+      {children}
+    </div>
+  );
+}
+
+function EmptyChart({ message = "No data in this period" }) {
+  return (
+    <div className="h-[240px] flex items-center justify-center text-sm text-muted-foreground">
+      {message}
     </div>
   );
 }

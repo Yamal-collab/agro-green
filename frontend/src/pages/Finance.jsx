@@ -19,6 +19,7 @@ export default function Finance() {
   const [dialog, setDialog] = useState(false);
   const [form, setForm] = useState({});
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
 
   const pnl = useQuery({ queryKey: ["pnl", month], queryFn: async () => (await api.get(`/finance/pnl?month=${month}`)).data });
   const txs = useQuery({ queryKey: ["txs"], queryFn: async () => (await api.get("/finance/transactions")).data });
@@ -27,15 +28,29 @@ export default function Finance() {
 
   const recordPay = useMutation({
     mutationFn: async (p) => (await api.post("/payments", p)).data,
-    onSuccess: () => { qc.invalidateQueries(); setDialog(false); setForm({}); },
+    onSuccess: (data) => {
+      qc.invalidateQueries();
+      setDialog(false);
+      setForm({});
+      setError("");
+      const allocs = data?.allocations || [];
+      const msg = allocs.length
+        ? `Payment ₹${data.applied_amount} applied to ${allocs.length} invoice(s)${data.advance_amount > 0 ? ` · ₹${data.advance_amount} advance` : ""}`
+        : `Payment ₹${data.amount} recorded`;
+      setSuccess(msg);
+      setTimeout(() => setSuccess(""), 4000);
+    },
     onError: (e) => setError(formatApiError(e.response?.data?.detail)),
   });
 
   const submit = (e) => {
     e.preventDefault();
-    const cust = customers.data?.find(c => c.id === form.customer_id);
+    setError("");
+    if (!form.customer_id) { setError("Please select a customer"); return; }
+    const amt = parseFloat(form.amount);
+    if (!amt || amt <= 0) { setError("Amount must be greater than 0"); return; }
     recordPay.mutate({
-      customer_id: form.customer_id, amount: parseFloat(form.amount),
+      customer_id: form.customer_id, amount: amt,
       date: form.date, method: form.method || "cash", notes: form.notes || "",
     });
   };
@@ -58,6 +73,12 @@ export default function Finance() {
           </div>
         }
       />
+
+      {success && (
+        <div data-testid="payment-success" className="mb-4 rounded-md border border-[#15803D]/30 bg-[#15803D]/10 text-[#15803D] px-4 py-2 text-sm font-medium">
+          ✓ {success}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6" data-testid="pnl-summary">
         <div className="bg-white border border-border rounded-lg p-5">
@@ -112,11 +133,14 @@ export default function Finance() {
             </thead>
             <tbody>
               {(payments.data || []).slice(0, MAX_PAYMENTS_DISPLAYED).map(p => {
-                const c = customers.data?.find(x => x.id === p.customer_id);
+                const c = customers.data?.find(x => x.id === (p.customer_id || p.party_id));
+                const allocLabel = (p.allocations || []).length
+                  ? `${p.allocations.length} invoice${p.allocations.length > 1 ? "s" : ""}`
+                  : "";
                 return (
                   <tr key={p.id} className="border-b border-border last:border-0">
                     <td className="py-2 text-xs">{p.date}</td>
-                    <td>{c?.name || "—"}</td>
+                    <td>{c?.name || p.party_name || "—"}{allocLabel && <span className="block text-[10px] text-muted-foreground">{allocLabel}{p.advance_amount > 0 ? ` · ₹${p.advance_amount} advance` : ""}</span>}</td>
                     <td className="capitalize text-xs text-muted-foreground">{p.method}</td>
                     <td className="text-right font-semibold text-[#15803D]">{currency(p.amount)}</td>
                   </tr>
@@ -172,7 +196,7 @@ export default function Finance() {
             </div>
             <form onSubmit={submit} className="space-y-3">
               <SelectField label="Customer *" testid="pay-customer" value={form.customer_id || ""} onChange={(v) => setForm({...form, customer_id: v})}
-                options={(customers.data || []).map(c => ({ value: c.id, label: `${c.name} (${currency(c.outstanding)} due)` }))} required />
+                options={(customers.data || []).slice().sort((a,b) => (b.outstanding||0) - (a.outstanding||0)).map(c => ({ value: c.id, label: `${c.name} (${currency(c.outstanding)} Due)` }))} required />
               <Field label="Amount *" type="number" testid="pay-amount" value={form.amount || ""} onChange={(v) => setForm({...form, amount: v})} required />
               <Field label="Date" type="date" testid="pay-date" value={form.date} onChange={(v) => setForm({...form, date: v})} required />
               <SelectField label="Method" testid="pay-method" value={form.method} onChange={(v) => setForm({...form, method: v})}
