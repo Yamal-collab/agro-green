@@ -548,6 +548,290 @@ async def dashboard(user=Depends(get_user)):
         "revenue_trend": trend,
     }
 
+# ============ Invoice PDF / Print / Share ============
+import io
+from urllib.parse import quote
+from fastapi.responses import StreamingResponse, HTMLResponse
+from reportlab.lib.pagesizes import A5
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+
+BUSINESS_INFO = {
+    "name": "AgriBiz ERP",
+    "tagline": "Integrated Agri-Business Management",
+    "address": "Tamil Nadu, India",
+    "phone": "+91 98765 43210",
+    "email": "info@agribiz.com",
+    "gst": "33ABCDE1234F1Z5",
+}
+
+async def _load_sale(stype: str, sale_id: str):
+    """Load sale, customer, and item-meta for given sale type."""
+    stype = stype.lower()
+    if stype == "feed":
+        sale = await db.feed_sales.find_one({"id": sale_id}, {"_id": 0})
+        if not sale: raise HTTPException(404, "Feed sale not found")
+        cust = await db.customers.find_one({"id": sale["customer_id"]}, {"_id": 0}) or {}
+        item = await db.feed_items.find_one({"id": sale["feed_item_id"]}, {"_id": 0}) or {}
+        return {
+            "type": "Feed Sale", "type_key": "feed", "sale": sale, "customer": cust,
+            "item_name": sale.get("feed_name") or item.get("name") or "Feed",
+            "unit": item.get("unit", "kg"),
+        }
+    if stype == "chick":
+        sale = await db.chick_sales.find_one({"id": sale_id}, {"_id": 0})
+        if not sale: raise HTTPException(404, "Chick sale not found")
+        cust = await db.customers.find_one({"id": sale["customer_id"]}, {"_id": 0}) or {}
+        return {
+            "type": "Chick Sale", "type_key": "chick", "sale": sale, "customer": cust,
+            "item_name": f"Chicks (Batch {sale.get('batch_no','')})",
+            "unit": "nos",
+        }
+    if stype == "farm":
+        sale = await db.farm_sales.find_one({"id": sale_id}, {"_id": 0})
+        if not sale: raise HTTPException(404, "Farm sale not found")
+        cust = await db.customers.find_one({"id": sale["customer_id"]}, {"_id": 0}) or {}
+        return {
+            "type": "Farm Sale", "type_key": "farm", "sale": sale, "customer": cust,
+            "item_name": "Poultry Birds",
+            "unit": "nos",
+        }
+    raise HTTPException(400, f"Invalid invoice type: {stype}")
+
+
+def _build_invoice_pdf(ctx: dict) -> bytes:
+    sale = ctx["sale"]; cust = ctx["customer"]
+    quantity = float(sale.get("quantity", 0) or 0)
+    unit_price = float(sale.get("unit_price", 0) or 0)
+    transport = float(sale.get("transport", 0) or 0)
+    discount = float(sale.get("discount", 0) or 0)
+    subtotal = quantity * unit_price
+    grand_total = float(sale.get("total", subtotal + transport - discount) or 0)
+
+    buf = io.BytesIO()
+    PAGE_W, PAGE_H = A5  # 148mm x 210mm
+    c = canvas.Canvas(buf, pagesize=A5)
+    M = 10 * mm
+
+    # Header band
+    c.setFillColor(colors.HexColor("#15803D"))
+    c.rect(0, PAGE_H - 22 * mm, PAGE_W, 22 * mm, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(M, PAGE_H - 11 * mm, BUSINESS_INFO["name"])
+    c.setFont("Helvetica", 8)
+    c.drawString(M, PAGE_H - 16 * mm, BUSINESS_INFO["tagline"])
+    c.setFont("Helvetica-Bold", 11)
+    c.drawRightString(PAGE_W - M, PAGE_H - 11 * mm, "TAX INVOICE")
+    c.setFont("Helvetica", 7)
+    c.drawRightString(PAGE_W - M, PAGE_H - 16 * mm, ctx["type"])
+
+    y = PAGE_H - 28 * mm
+    c.setFillColor(colors.black)
+
+    # Business details + GST
+    c.setFont("Helvetica", 7.5)
+    c.drawString(M, y, BUSINESS_INFO["address"])
+    y -= 3.5 * mm
+    c.drawString(M, y, f"Phone: {BUSINESS_INFO['phone']}  |  Email: {BUSINESS_INFO['email']}")
+    y -= 3.5 * mm
+    c.setFont("Helvetica-Bold", 7.5)
+    c.drawString(M, y, f"GSTIN: {BUSINESS_INFO['gst']}")
+    y -= 5 * mm
+
+    # Invoice meta box
+    c.setStrokeColor(colors.HexColor("#E5E7EB"))
+    c.setLineWidth(0.5)
+    box_h = 16 * mm
+    c.rect(M, y - box_h, PAGE_W - 2 * M, box_h, fill=0, stroke=1)
+    c.setFont("Helvetica-Bold", 7)
+    c.setFillColor(colors.HexColor("#6B7280"))
+    c.drawString(M + 2 * mm, y - 4 * mm, "INVOICE NO.")
+    c.drawString(M + 50 * mm, y - 4 * mm, "INVOICE DATE")
+    c.drawString(M + 95 * mm, y - 4 * mm, "PAYMENT STATUS")
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(M + 2 * mm, y - 9 * mm, str(sale.get("invoice_no", "—")))
+    c.setFont("Helvetica", 9)
+    c.drawString(M + 50 * mm, y - 9 * mm, str(sale.get("date", "—")))
+    pstatus = str(sale.get("payment_status", "pending")).upper()
+    pcolor = colors.HexColor("#15803D") if pstatus == "PAID" else (
+        colors.HexColor("#C2410C") if pstatus == "PENDING" else colors.HexColor("#CA8A04"))
+    c.setFillColor(pcolor)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(M + 95 * mm, y - 9 * mm, pstatus)
+    c.setFillColor(colors.black)
+    y -= (box_h + 5 * mm)
+
+    # Customer
+    c.setFont("Helvetica-Bold", 8)
+    c.setFillColor(colors.HexColor("#6B7280"))
+    c.drawString(M, y, "BILL TO")
+    y -= 4 * mm
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(M, y, cust.get("name", "—"))
+    y -= 4 * mm
+    c.setFont("Helvetica", 8)
+    if cust.get("farm_name"):
+        c.drawString(M, y, cust["farm_name"]); y -= 3.5 * mm
+    if cust.get("address"):
+        c.drawString(M, y, cust["address"][:80]); y -= 3.5 * mm
+    if cust.get("phone"):
+        c.drawString(M, y, f"Phone: {cust['phone']}"); y -= 3.5 * mm
+    if cust.get("gst"):
+        c.drawString(M, y, f"GSTIN: {cust['gst']}"); y -= 3.5 * mm
+    y -= 3 * mm
+
+    # Items table header
+    c.setFillColor(colors.HexColor("#F3F4F6"))
+    c.rect(M, y - 6 * mm, PAGE_W - 2 * M, 6 * mm, fill=1, stroke=0)
+    c.setFillColor(colors.HexColor("#374151"))
+    c.setFont("Helvetica-Bold", 7.5)
+    c.drawString(M + 2 * mm, y - 4 * mm, "DESCRIPTION")
+    c.drawRightString(M + 78 * mm, y - 4 * mm, "QTY")
+    c.drawRightString(M + 102 * mm, y - 4 * mm, "RATE")
+    c.drawRightString(PAGE_W - M - 2 * mm, y - 4 * mm, "AMOUNT")
+    y -= 6 * mm
+
+    # Item row
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica", 9)
+    c.drawString(M + 2 * mm, y - 5 * mm, ctx["item_name"][:48])
+    c.drawRightString(M + 78 * mm, y - 5 * mm, f"{quantity:g} {ctx['unit']}")
+    c.drawRightString(M + 102 * mm, y - 5 * mm, f"Rs. {unit_price:,.2f}")
+    c.drawRightString(PAGE_W - M - 2 * mm, y - 5 * mm, f"Rs. {subtotal:,.2f}")
+    y -= 8 * mm
+
+    # Totals breakdown
+    c.setStrokeColor(colors.HexColor("#E5E7EB"))
+    c.line(M, y, PAGE_W - M, y)
+    y -= 4 * mm
+    c.setFont("Helvetica", 8.5)
+    def row(label, value, bold=False, color=None):
+        nonlocal y
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", 9 if bold else 8.5)
+        if color: c.setFillColor(color)
+        c.drawRightString(M + 102 * mm, y, label)
+        c.drawRightString(PAGE_W - M - 2 * mm, y, value)
+        c.setFillColor(colors.black)
+        y -= 4.5 * mm
+
+    row("Subtotal", f"Rs. {subtotal:,.2f}")
+    row("Transport", f"Rs. {transport:,.2f}")
+    row("Discount", f"- Rs. {discount:,.2f}")
+    y -= 1 * mm
+    c.setFillColor(colors.HexColor("#15803D"))
+    c.rect(M + 60 * mm, y - 2 * mm, PAGE_W - 2 * M - 60 * mm, 8 * mm, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawRightString(M + 102 * mm, y + 2.5 * mm, "GRAND TOTAL")
+    c.drawRightString(PAGE_W - M - 2 * mm, y + 2.5 * mm, f"Rs. {grand_total:,.2f}")
+    c.setFillColor(colors.black)
+    y -= 14 * mm
+
+    # Thank-you + signature
+    c.setFont("Helvetica-Oblique", 9)
+    c.setFillColor(colors.HexColor("#15803D"))
+    c.drawString(M, y, "Thank you for your business")
+    c.setFillColor(colors.black)
+
+    # Signature line bottom-right
+    sig_y = 18 * mm
+    c.setStrokeColor(colors.HexColor("#9CA3AF"))
+    c.line(PAGE_W - M - 50 * mm, sig_y, PAGE_W - M, sig_y)
+    c.setFont("Helvetica", 7.5)
+    c.setFillColor(colors.HexColor("#6B7280"))
+    c.drawRightString(PAGE_W - M, sig_y - 4 * mm, "Authorised Signatory")
+
+    # Footer
+    c.setFont("Helvetica", 6.5)
+    c.drawString(M, 8 * mm, f"This is a computer-generated invoice  •  {BUSINESS_INFO['name']}")
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+@api.get("/invoice/{stype}/{sale_id}/pdf")
+async def invoice_pdf(stype: str, sale_id: str, user=Depends(get_user)):
+    ctx = await _load_sale(stype, sale_id)
+    pdf_bytes = _build_invoice_pdf(ctx)
+    inv_no = ctx["sale"].get("invoice_no", sale_id)
+    filename = f"Invoice-{inv_no}.pdf"
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'})
+
+
+@api.get("/invoice/{stype}/{sale_id}/print", response_class=HTMLResponse)
+async def invoice_print(stype: str, sale_id: str, request: Request, user=Depends(get_user)):
+    ctx = await _load_sale(stype, sale_id)
+    inv_no = ctx["sale"].get("invoice_no", sale_id)
+    # PDF endpoint URL (relative path is fine inside an iframe)
+    pdf_url = f"/api/invoice/{stype}/{sale_id}/pdf"
+    html = f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Print Invoice {inv_no}</title>
+<style>
+  html,body{{margin:0;padding:0;height:100%;background:#f3f4f6;font-family:system-ui,sans-serif}}
+  iframe{{width:100%;height:100vh;border:0;background:#fff}}
+  .bar{{position:fixed;top:8px;right:8px;z-index:10}}
+  .bar button{{background:#15803D;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer}}
+</style></head>
+<body>
+<div class="bar"><button onclick="doPrint()">Print Again</button></div>
+<iframe id="pdf" src="{pdf_url}"></iframe>
+<script>
+  function doPrint() {{
+    const f = document.getElementById('pdf');
+    try {{ f.contentWindow.focus(); f.contentWindow.print(); }}
+    catch(e) {{ window.print(); }}
+  }}
+  document.getElementById('pdf').addEventListener('load', function() {{
+    setTimeout(doPrint, 600);
+  }});
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
+@api.post("/invoice/{stype}/{sale_id}/share")
+async def invoice_share(stype: str, sale_id: str, request: Request, user=Depends(get_user)):
+    ctx = await _load_sale(stype, sale_id)
+    sale = ctx["sale"]; cust = ctx["customer"]
+    inv_no = sale.get("invoice_no", sale_id)
+    total = float(sale.get("total", 0) or 0)
+    base = str(request.base_url).rstrip("/")
+    pdf_url = f"{base}/api/invoice/{stype}/{sale_id}/pdf"
+
+    message = (
+        f"Hello {cust.get('name','Customer')},\n\n"
+        f"Please find your invoice from {BUSINESS_INFO['name']}.\n\n"
+        f"Invoice No: {inv_no}\n"
+        f"Date: {sale.get('date','')}\n"
+        f"Amount: Rs. {total:,.2f}\n"
+        f"Payment Status: {str(sale.get('payment_status','pending')).upper()}\n\n"
+        f"Invoice PDF: {pdf_url}\n\n"
+        f"Thank you for your business."
+    )
+    phone_raw = "".join(ch for ch in (cust.get("phone") or "") if ch.isdigit())
+    if phone_raw and not phone_raw.startswith("91") and len(phone_raw) == 10:
+        phone_raw = "91" + phone_raw
+    wa_phone = phone_raw  # may be empty -> generic wa.me/?text=
+    whatsapp_url = (f"https://wa.me/{wa_phone}?text={quote(message)}"
+                    if wa_phone else f"https://wa.me/?text={quote(message)}")
+
+    subject = f"Invoice {inv_no} from {BUSINESS_INFO['name']}"
+    mailto_url = f"mailto:{quote(cust.get('email',''))}?subject={quote(subject)}&body={quote(message)}"
+
+    return {
+        "whatsapp_url": whatsapp_url,
+        "mailto_url": mailto_url,
+        "pdf_url": pdf_url,
+        "invoice_no": inv_no,
+    }
+
+
 # ============ Startup ============
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
