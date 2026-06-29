@@ -1683,6 +1683,140 @@ async def dashboard_recent_sales(limit: int = 10, user=Depends(get_user)):
     return combined[:limit]
 
 
+# ============ Executive Dashboard (Reports) ============
+@api.get("/reports/exec-dashboard")
+async def reports_exec_dashboard(dfrom: Optional[str] = None, dto: Optional[str] = None,
+                                 user=Depends(get_user)):
+    # Per-BU sales (revenue, outstanding, count)
+    per_bu = {1: {"revenue": 0.0, "outstanding": 0.0, "sales_count": 0},
+              2: {"revenue": 0.0, "outstanding": 0.0, "sales_count": 0},
+              3: {"revenue": 0.0, "outstanding": 0.0, "sales_count": 0},
+              4: {"revenue": 0.0, "outstanding": 0.0, "sales_count": 0}}
+    for coll_name, bu, _ in SALE_COLLECTIONS:
+        rows = await db[coll_name].find({}, {"_id": 0}).to_list(50000)
+        for r in rows:
+            if not _within(r, dfrom, dto): continue
+            per_bu[bu]["revenue"] += float(r.get("total", 0) or 0)
+            per_bu[bu]["outstanding"] += float(r.get("balance_due", 0) or 0)
+            per_bu[bu]["sales_count"] += 1
+
+    # Finance expenses & income per BU (within range)
+    fin_per_bu = {1: {"income": 0.0, "expense": 0.0},
+                  2: {"income": 0.0, "expense": 0.0},
+                  3: {"income": 0.0, "expense": 0.0},
+                  4: {"income": 0.0, "expense": 0.0}}
+    expense_by_category = {}
+    fin = await db.finance_transactions.find({}, {"_id": 0}).to_list(100000)
+    for t in fin:
+        if not _within(t, dfrom, dto): continue
+        bu = int(t.get("business_unit", 0) or 0)
+        amt = float(t.get("amount", 0) or 0)
+        typ = t.get("type", "")
+        if bu in fin_per_bu:
+            if typ == "income": fin_per_bu[bu]["income"] += amt
+            elif typ == "expense": fin_per_bu[bu]["expense"] += amt
+        if typ == "expense":
+            cat = t.get("category", "Other") or "Other"
+            expense_by_category[cat] = expense_by_category.get(cat, 0.0) + amt
+
+    # Stock value per BU
+    stock_value_bu = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
+    stock_units_bu = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
+    feed_items = await db.feed_items.find({}, {"_id": 0}).to_list(5000)
+    for f in feed_items:
+        qty = float(f.get("current_stock", 0) or 0)
+        cost = float(f.get("weighted_avg_cost", 0) or 0)
+        stock_value_bu[1] += qty * cost
+        stock_units_bu[1] += qty
+    batches = await db.poultry_batches.find({}, {"_id": 0}).to_list(5000)
+    for b in batches:
+        avail = int(b.get("hatched_chicks", 0) or 0) - int(b.get("sold", 0) or 0) - int(b.get("transferred", 0) or 0)
+        if avail < 0: avail = 0
+        stock_units_bu[2] += avail
+    farm_stock = await db.farm_stock.find({}, {"_id": 0}).to_list(5000)
+    for s in farm_stock:
+        stock_units_bu[3] += int(s.get("current_count", 0) or 0)
+    tanks = await db.water_tanks.find({}, {"_id": 0}).to_list(5000)
+    for t in tanks:
+        stock_units_bu[4] += float(t.get("current_liters", 0) or 0)
+
+    # Compose per-BU result
+    BU_UNITS = {1: "kg", 2: "chicks", 3: "birds", 4: "L"}
+    bu_result = {}
+    for bu in (1, 2, 3, 4):
+        rev = round(per_bu[bu]["revenue"], 2)
+        exp = round(fin_per_bu[bu]["expense"], 2)
+        bu_result[f"bu{bu}"] = {
+            "business_unit": bu,
+            "label": BU_LABEL_MAP[bu],
+            "revenue": rev,
+            "expenses": exp,
+            "profit": round(rev - exp, 2),
+            "outstanding": round(per_bu[bu]["outstanding"], 2),
+            "stock_value": round(stock_value_bu[bu], 2),
+            "stock_units": round(stock_units_bu[bu], 2),
+            "stock_unit_label": BU_UNITS[bu],
+            "sales_count": per_bu[bu]["sales_count"],
+        }
+
+    total_rev = round(sum(v["revenue"] for v in bu_result.values()), 2)
+    total_exp = round(sum(v["expenses"] for v in bu_result.values()), 2)
+    total_out = round(sum(v["outstanding"] for v in bu_result.values()), 2)
+    total_stk = round(sum(v["stock_value"] for v in bu_result.values()), 2)
+
+    # Monthly trend (last 6 months ending today or dto)
+    from datetime import datetime as _dt
+    end_ref = (dto or _dt.utcnow().strftime("%Y-%m-%d"))[:7]  # YYYY-MM
+    try:
+        year, month = int(end_ref[:4]), int(end_ref[5:7])
+    except Exception:
+        now = _dt.utcnow(); year, month = now.year, now.month
+    months = []
+    y, m = year, month
+    for _ in range(6):
+        months.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12; y -= 1
+    months.reverse()
+    trend_map = {mo: {"month": mo, "revenue": 0.0, "expenses": 0.0, "profit": 0.0} for mo in months}
+    # Revenue from sales (consistent with totals.revenue)
+    for coll_name, _bu, _ in SALE_COLLECTIONS:
+        rows = await db[coll_name].find({}, {"_id": 0}).to_list(50000)
+        for r in rows:
+            d = (r.get("date") or "")[:7]
+            if d in trend_map:
+                trend_map[d]["revenue"] += float(r.get("total", 0) or 0)
+    # Expenses from finance (only true outflows)
+    for t in fin:
+        if t.get("type") != "expense": continue
+        d = (t.get("date") or "")[:7]
+        if d in trend_map:
+            trend_map[d]["expenses"] += float(t.get("amount", 0) or 0)
+    monthly_trend = []
+    for mo in months:
+        r = trend_map[mo]
+        r["revenue"] = round(r["revenue"], 2)
+        r["expenses"] = round(r["expenses"], 2)
+        r["profit"] = round(r["revenue"] - r["expenses"], 2)
+        monthly_trend.append(r)
+
+    expense_breakdown = [{"category": k, "amount": round(v, 2)}
+                         for k, v in sorted(expense_by_category.items(), key=lambda x: -x[1])]
+
+    return {
+        "from": dfrom, "to": dto,
+        "totals": {
+            "revenue": total_rev, "expenses": total_exp,
+            "profit": round(total_rev - total_exp, 2),
+            "outstanding": total_out, "stock_value": total_stk,
+        },
+        "per_bu": bu_result,
+        "monthly_trend": monthly_trend,
+        "expense_breakdown": expense_breakdown,
+    }
+
+
 # ============ Startup ============
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True,
