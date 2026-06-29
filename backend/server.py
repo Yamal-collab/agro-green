@@ -560,7 +560,7 @@ from reportlab.pdfgen import canvas
 BUSINESS_INFO = {
     "name": "AgriBiz ERP",
     "tagline": "Integrated Agri-Business Management",
-    "address": "Tamil Nadu, India",
+    "address": "Poolapees, Malappuram, Kerala",
     "phone": "+91 98765 43210",
     "email": "info@agribiz.com",
     "gst": "33ABCDE1234F1Z5",
@@ -721,16 +721,31 @@ def _build_invoice_pdf(ctx: dict) -> bytes:
     row("Subtotal", f"Rs. {subtotal:,.2f}")
     row("Transport", f"Rs. {transport:,.2f}")
     row("Discount", f"- Rs. {discount:,.2f}")
-    y -= 1 * mm
-    c.setFillColor(colors.HexColor("#15803D"))
-    c.rect(M + 60 * mm, y - 2 * mm, PAGE_W - 2 * M - 60 * mm, 8 * mm, fill=1, stroke=0)
-    c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 11)
-    c.drawRightString(M + 102 * mm, y + 2.5 * mm, "GRAND TOTAL")
-    c.drawRightString(PAGE_W - M - 2 * mm, y + 2.5 * mm, f"Rs. {grand_total:,.2f}")
-    c.setFillColor(colors.black)
-    y -= 14 * mm
+    extra_gap = 12 * mm   # change this value
+    y -= extra_gap
+      
+    # Thin separator line above Grand Total
+    c.setStrokeColor(colors.HexColor("#D1D5DB"))
+    c.setLineWidth(0.8)
+    c.line(M + 60 * mm, y + 6 * mm, PAGE_W - M, y + 6 * mm)
 
+    # Black bold text
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 11)
+
+    text_y = y + 1.5 * mm
+
+    c.drawRightString(M + 102 * mm, text_y, "GRAND TOTAL")
+    c.drawRightString(
+    PAGE_W - M - 2 * mm,
+    text_y,
+    f"Rs. {grand_total:,.2f}"
+)
+
+    c.setFillColor(colors.black)
+    y -= 12 * mm
+    
+   
     # Thank-you + signature
     c.setFont("Helvetica-Oblique", 9)
     c.setFillColor(colors.HexColor("#15803D"))
