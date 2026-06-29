@@ -47,8 +47,15 @@ export default function CustomerDetail() {
 
   const customer = details.data?.customer;
   const summary = details.data?.summary;
-  const invoices = details.data?.invoices || [];
-  const payments = details.data?.payments || [];
+  const invoices = useMemo(
+  () => details.data?.invoices ?? [],
+  [details.data?.invoices]
+);
+
+const payments = useMemo(
+  () => details.data?.payments ?? [],
+  [details.data?.payments]
+);
   const ledgerData = ledger.data;
 
   const lastPurchase = useMemo(() =>
