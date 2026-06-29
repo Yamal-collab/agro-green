@@ -117,8 +117,15 @@ class WaterExpenseIn(BaseModel):
     category: str; amount: float; date: str; notes: str = ""
 
 class PaymentIn(BaseModel):
-    party_id: str; party_type: str  # "customer" | "supplier"
-    amount: float; date: str; method: str = "cash"; notes: str = ""; business_unit: int = 1
+    customer_id: Optional[str] = None
+    amount: float
+    date: str
+    method: str = "cash"
+    notes: str = ""
+    business_unit: int = 0  # 0 = cross-BU FIFO
+    # Back-compat optional fields
+    party_id: Optional[str] = None
+    party_type: Optional[str] = "customer"
 
 # ============ Auth ============
 @api.post("/auth/login")
@@ -202,13 +209,17 @@ async def feed_sale(p: FeedSaleIn, user=Depends(get_user)):
     total = p.quantity * p.unit_price + p.transport - p.discount
     cost = p.quantity * item["weighted_avg_cost"]
     inv = await gen_invoice("FE")
+    amount_paid = round(total, 2) if p.payment_status == "paid" else 0.0
+    balance_due = round(total - amount_paid, 2)
     d = {"id": new_id(), "invoice_no": inv, **p.model_dump(),
          "customer_name": cust["name"], "feed_name": item["name"],
-         "total": round(total, 2), "cost_basis": round(cost, 2), "created_at": now_iso()}
+         "total": round(total, 2), "amount_paid": amount_paid,
+         "balance_due": balance_due, "business_unit": 1,
+         "cost_basis": round(cost, 2), "created_at": now_iso()}
     await db.feed_sales.insert_one(d); d.pop('_id', None)
     await db.feed_items.update_one({"id": p.feed_item_id}, {"$inc": {"current_stock": -p.quantity}})
-    if p.payment_status != "paid":
-        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": total}})
+    if balance_due > 0:
+        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": balance_due}})
     await fin_write(1, "income", "Feed Sale", total, p.date, d["id"], inv, "feed_sale")
     return d
 
@@ -281,13 +292,16 @@ async def chick_sale(p: ChickSaleIn, user=Depends(get_user)):
     if avail < p.quantity: raise HTTPException(400, f"Only {avail} chicks available")
     total = p.quantity * p.unit_price + p.transport - p.discount
     inv = await gen_invoice("CH")
+    amount_paid = round(total, 2) if p.payment_status == "paid" else 0.0
+    balance_due = round(total - amount_paid, 2)
     d = {"id": new_id(), "invoice_no": inv, **p.model_dump(),
          "customer_name": cust["name"], "batch_no": batch["batch_no"],
-         "total": round(total, 2), "created_at": now_iso()}
+         "total": round(total, 2), "amount_paid": amount_paid,
+         "balance_due": balance_due, "business_unit": 2, "created_at": now_iso()}
     await db.chick_sales.insert_one(d); d.pop('_id', None)
     await db.poultry_batches.update_one({"id": p.batch_id}, {"$inc": {"sold": p.quantity}})
-    if p.payment_status != "paid":
-        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": total}})
+    if balance_due > 0:
+        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": balance_due}})
     await fin_write(2, "income", "Chick Sale", total, p.date, d["id"], inv, "chick_sale")
     return d
 
@@ -350,8 +364,12 @@ async def farm_sale(p: FarmSaleIn, user=Depends(get_user)):
     if not cust: raise HTTPException(404, "Customer not found")
     total = p.quantity * p.unit_price + p.transport - p.discount
     inv = await gen_invoice("FA")
+    amount_paid = round(total, 2) if p.payment_status == "paid" else 0.0
+    balance_due = round(total - amount_paid, 2)
     d = {"id": new_id(), "invoice_no": inv, **p.model_dump(),
-         "customer_name": cust["name"], "total": round(total, 2), "created_at": now_iso()}
+         "customer_name": cust["name"], "total": round(total, 2),
+         "amount_paid": amount_paid, "balance_due": balance_due,
+         "business_unit": 3, "created_at": now_iso()}
     await db.farm_sales.insert_one(d); d.pop('_id', None)
     # Decrement farm stock FIFO
     rem = p.quantity
@@ -361,8 +379,8 @@ async def farm_sale(p: FarmSaleIn, user=Depends(get_user)):
         take = min(rem, s["current_count"])
         await db.farm_stock.update_one({"id": s["id"]}, {"$inc": {"current_count": -take}})
         rem -= take
-    if p.payment_status != "paid":
-        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": total}})
+    if balance_due > 0:
+        await db.customers.update_one({"id": p.customer_id}, {"$inc": {"outstanding": balance_due}})
     await fin_write(3, "income", "Farm Sale", total, p.date, d["id"], inv, "farm_sale")
     return d
 
@@ -408,9 +426,17 @@ async def water_sale(p: WaterSaleIn, user=Depends(get_user)):
     if not cust: raise HTTPException(404, "Customer not found")
     total = p.liters * p.rate
     pending = max(0, total - p.received)
+    pstatus = "paid" if pending == 0 else ("partial" if p.received > 0 else "pending")
+    inv = await gen_invoice("WA")
     d = {"id": new_id(), **p.model_dump(),
+         "invoice_no": inv,
          "customer_name": cust["name"], "total": round(total, 2),
-         "pending": round(pending, 2), "created_at": now_iso()}
+         "pending": round(pending, 2),
+         "amount_paid": round(p.received, 2),
+         "balance_due": round(pending, 2),
+         "payment_status": pstatus,
+         "business_unit": 4,
+         "created_at": now_iso()}
     await db.water_sales.insert_one(d); d.pop('_id', None)
     # Decrement first tank with stock
     tanks_ = await db.water_tanks.find({"current_liters": {"$gt": 0}}).sort("created_at", 1).to_list(50)
@@ -435,24 +461,182 @@ async def add_water_expense(p: WaterExpenseIn, user=Depends(get_user)):
     await fin_write(4, "expense", p.category, p.amount, p.date, d["id"], "", "water_expense")
     return d
 
-# ============ Payments ============
+# ============ Payments (FIFO Customer Allocation) ============
+SALE_COLLECTIONS = [
+    ("feed_sales", 1, "FE"),
+    ("chick_sales", 2, "CH"),
+    ("farm_sales", 3, "FA"),
+    ("water_sales", 4, "WA"),
+]
+
+def _derive_pstatus(amount_paid: float, total: float) -> str:
+    if amount_paid <= 0: return "pending"
+    if amount_paid + 0.0001 >= total: return "paid"
+    return "partial"
+
+async def _ensure_sale_payment_fields(coll_name: str, bu: int):
+    """Backfill amount_paid / balance_due / business_unit / payment_status on legacy docs."""
+    coll = db[coll_name]
+    async for s in coll.find({"$or": [{"amount_paid": {"$exists": False}},
+                                       {"balance_due": {"$exists": False}},
+                                       {"business_unit": {"$exists": False}}]}):
+        total = float(s.get("total", 0) or 0)
+        if coll_name == "water_sales":
+            paid = float(s.get("amount_paid", s.get("received", 0)) or 0)
+            bal = float(s.get("balance_due", s.get("pending", max(0, total - paid))) or 0)
+        else:
+            pstatus = s.get("payment_status", "pending")
+            paid = total if pstatus == "paid" else 0.0
+            bal = round(total - paid, 2)
+        upd = {"amount_paid": round(paid, 2), "balance_due": round(bal, 2),
+               "business_unit": bu, "payment_status": _derive_pstatus(paid, total)}
+        await coll.update_one({"id": s["id"]}, {"$set": upd})
+
+async def _recompute_customer_outstanding(customer_id: str) -> float:
+    total_bal = 0.0
+    for coll_name, _bu, _pref in SALE_COLLECTIONS:
+        rows = await db[coll_name].find(
+            {"customer_id": customer_id, "balance_due": {"$gt": 0}},
+            {"balance_due": 1, "_id": 0}
+        ).to_list(5000)
+        total_bal += sum(float(r.get("balance_due", 0) or 0) for r in rows)
+    total_bal = round(total_bal, 2)
+    await db.customers.update_one({"id": customer_id}, {"$set": {"outstanding": total_bal}})
+    return total_bal
+
+async def _customer_open_invoices(customer_id: str):
+    """Return unpaid sales for a customer across all BUs, FIFO by created_at."""
+    out = []
+    for coll_name, bu, pref in SALE_COLLECTIONS:
+        rows = await db[coll_name].find(
+            {"customer_id": customer_id, "balance_due": {"$gt": 0}},
+            {"_id": 0}
+        ).to_list(5000)
+        for r in rows:
+            r["_collection"] = coll_name
+            r["_bu"] = bu
+            out.append(r)
+    out.sort(key=lambda r: r.get("created_at", ""))
+    return out
+
 @api.get("/payments")
 async def payments(user=Depends(get_user)): return await list_col(db.payments)
 
 @api.post("/payments")
 async def record_payment(p: PaymentIn, user=Depends(get_user)):
-    coll = db.customers if p.party_type == "customer" else db.suppliers
-    party = await coll.find_one({"id": p.party_id})
-    if not party: raise HTTPException(404, "Party not found")
-    d = {"id": new_id(), **p.model_dump(), "party_name": party["name"], "created_at": now_iso()}
-    await db.payments.insert_one(d); d.pop('_id', None)
-    await coll.update_one({"id": p.party_id}, {"$inc": {"outstanding": -p.amount}})
-    if p.party_type == "customer":
-        await fin_write(p.business_unit, "income", "Payment Received", p.amount, p.date, d["id"], party["name"], "payment")
+    # Resolve party
+    party_type = (p.party_type or "customer").lower()
+    if p.customer_id:
+        party_type = "customer"
+        party_id = p.customer_id
+    elif p.party_id:
+        party_id = p.party_id
     else:
-        await fin_write(p.business_unit, "expense", "Supplier Payment (paid)", 0, p.date, d["id"], party["name"], "supplier_payment")
-        # Note: supplier payment reduces outstanding only; original expense was already booked at purchase
+        raise HTTPException(422, "customer_id is required")
+    if p.amount is None or p.amount <= 0:
+        raise HTTPException(422, "amount must be greater than zero")
+
+    if party_type == "supplier":
+        sup = await db.suppliers.find_one({"id": party_id})
+        if not sup: raise HTTPException(404, "Supplier not found")
+        d = {"id": new_id(), "customer_id": None, "party_id": party_id,
+             "party_type": "supplier", "party_name": sup["name"],
+             "amount": round(float(p.amount), 2), "date": p.date,
+             "method": p.method, "notes": p.notes,
+             "business_unit": p.business_unit or 1,
+             "allocations": [], "created_at": now_iso()}
+        await db.payments.insert_one(d); d.pop("_id", None)
+        await db.suppliers.update_one({"id": party_id}, {"$inc": {"outstanding": -float(p.amount)}})
+        await fin_write(d["business_unit"], "expense", "Supplier Payment (paid)", 0,
+                        p.date, d["id"], sup["name"], "supplier_payment")
+        return d
+
+    # Customer payment — FIFO
+    cust = await db.customers.find_one({"id": party_id})
+    if not cust: raise HTTPException(404, "Customer not found")
+    invoices = await _customer_open_invoices(party_id)
+    remaining = round(float(p.amount), 2)
+    allocations = []
+    for inv in invoices:
+        if remaining <= 0.0001: break
+        bal = float(inv.get("balance_due", 0) or 0)
+        if bal <= 0: continue
+        applied = round(min(remaining, bal), 2)
+        new_paid = round(float(inv.get("amount_paid", 0) or 0) + applied, 2)
+        new_bal = round(bal - applied, 2)
+        total = float(inv.get("total", 0) or 0)
+        new_status = _derive_pstatus(new_paid, total)
+        set_doc = {"amount_paid": new_paid, "balance_due": new_bal,
+                   "payment_status": new_status}
+        if inv["_collection"] == "water_sales":
+            set_doc["pending"] = new_bal
+        if inv["_collection"] == "water_sales":
+            set_doc["received"] = new_paid
+        await db[inv["_collection"]].update_one({"id": inv["id"]}, {"$set": set_doc})
+        allocations.append({
+            "sale_id": inv["id"], "sale_type": inv["_collection"],
+            "business_unit": inv["_bu"], "invoice_no": inv.get("invoice_no", ""),
+            "amount_applied": applied, "previous_balance": bal,
+            "new_balance": new_bal, "new_status": new_status,
+        })
+        remaining = round(remaining - applied, 4)
+
+    advance = round(remaining, 2) if remaining > 0.0001 else 0.0
+    applied_total = round(float(p.amount) - advance, 2)
+
+    # Persist payment record
+    bu_for_fin = p.business_unit or (allocations[0]["business_unit"] if allocations else 1)
+    d = {"id": new_id(), "customer_id": party_id, "party_id": party_id,
+         "party_type": "customer", "party_name": cust["name"],
+         "amount": round(float(p.amount), 2),
+         "applied_amount": applied_total, "advance_amount": advance,
+         "date": p.date, "method": p.method, "notes": p.notes,
+         "business_unit": bu_for_fin, "allocations": allocations,
+         "created_at": now_iso()}
+    await db.payments.insert_one(d); d.pop("_id", None)
+
+    # Recompute customer outstanding from authoritative source (sale balances)
+    new_outstanding = await _recompute_customer_outstanding(party_id)
+    d["customer_outstanding_after"] = new_outstanding
+
+    # Write a finance income txn for the payment (cash received)
+    await fin_write(bu_for_fin, "income", "Payment Received",
+                    float(p.amount), p.date, d["id"], cust["name"], "payment")
     return d
+
+# ============ Customer Details (invoices + payments) ============
+@api.get("/customers/{cid}/details")
+async def customer_details(cid: str, user=Depends(get_user)):
+    cust = await db.customers.find_one({"id": cid}, {"_id": 0})
+    if not cust: raise HTTPException(404, "Customer not found")
+    invoices = []
+    for coll_name, bu, pref in SALE_COLLECTIONS:
+        rows = await db[coll_name].find({"customer_id": cid}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+        for r in rows:
+            invoices.append({
+                "id": r["id"],
+                "invoice_no": r.get("invoice_no", ""),
+                "date": r.get("date", ""),
+                "business_unit": bu,
+                "sale_type": coll_name,
+                "total": float(r.get("total", 0) or 0),
+                "amount_paid": float(r.get("amount_paid", 0) or 0),
+                "balance_due": float(r.get("balance_due", 0) or 0),
+                "payment_status": r.get("payment_status", "pending"),
+                "created_at": r.get("created_at", ""),
+            })
+    invoices.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    pays = await db.payments.find(
+        {"$or": [{"customer_id": cid}, {"party_id": cid, "party_type": "customer"}]},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(2000)
+    total_billed = sum(i["total"] for i in invoices)
+    total_paid = sum(i["amount_paid"] for i in invoices)
+    total_due = sum(i["balance_due"] for i in invoices)
+    return {"customer": cust, "invoices": invoices, "payments": pays,
+            "summary": {"total_billed": round(total_billed, 2),
+                        "total_paid": round(total_paid, 2),
+                        "total_due": round(total_due, 2)}}
 
 # ============ Internal Transfers list ============
 @api.get("/transfers")
@@ -861,3 +1045,15 @@ async def startup():
         logger.info(f"Seeded admin: {admin_email}")
     elif not vp(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hp(admin_password)}})
+
+    # Migrate legacy sales: ensure amount_paid / balance_due / business_unit / payment_status exist
+    try:
+        for coll_name, bu, _pref in SALE_COLLECTIONS:
+            await _ensure_sale_payment_fields(coll_name, bu)
+        # Recompute outstanding for every customer from balance_due totals
+        customers_list = await db.customers.find({}, {"id": 1, "_id": 0}).to_list(20000)
+        for c in customers_list:
+            await _recompute_customer_outstanding(c["id"])
+        logger.info("Payment-fields migration complete")
+    except Exception as e:
+        logger.warning(f"Migration warning: {e}")
