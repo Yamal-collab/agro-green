@@ -1016,6 +1016,673 @@ async def invoice_share(stype: str, sale_id: str, request: Request, user=Depends
     }
 
 
+# ============ Customer Ledger / Statement ============
+def _to_date(s: str) -> str:
+    return (s or "")[:10]
+
+def _ledger_filter(entry_date: str, dfrom: Optional[str], dto: Optional[str]) -> bool:
+    if dfrom and entry_date < dfrom: return False
+    if dto and entry_date > dto: return False
+    return True
+
+async def _customer_ledger(customer_id: str, dfrom: Optional[str] = None, dto: Optional[str] = None):
+    cust = await db.customers.find_one({"id": customer_id}, {"_id": 0})
+    if not cust: raise HTTPException(404, "Customer not found")
+
+    invoices = []
+    for coll_name, bu, _pref in SALE_COLLECTIONS:
+        rows = await db[coll_name].find({"customer_id": customer_id}, {"_id": 0}).to_list(10000)
+        for r in rows:
+            invoices.append({
+                "id": r["id"], "invoice_no": r.get("invoice_no", ""),
+                "date": _to_date(r.get("date", "")),
+                "business_unit": bu, "sale_type": coll_name,
+                "total": float(r.get("total", 0) or 0),
+                "amount_paid": float(r.get("amount_paid", 0) or 0),
+                "balance_due": float(r.get("balance_due", 0) or 0),
+                "payment_status": r.get("payment_status", "pending"),
+                "created_at": r.get("created_at", ""),
+            })
+    payments = await db.payments.find(
+        {"$or": [{"customer_id": customer_id}, {"party_id": customer_id, "party_type": "customer"}]},
+        {"_id": 0}
+    ).to_list(10000)
+    for p in payments:
+        p["date"] = _to_date(p.get("date", ""))
+
+    # Opening balance = sum of debits/credits BEFORE dfrom
+    opening = 0.0
+    if dfrom:
+        for inv in invoices:
+            if inv["date"] < dfrom: opening += inv["total"]
+        for p in payments:
+            if p["date"] < dfrom: opening -= float(p.get("amount", 0) or 0)
+
+    entries = []
+    for inv in invoices:
+        if _ledger_filter(inv["date"], dfrom, dto):
+            entries.append({
+                "date": inv["date"], "created_at": inv.get("created_at", ""),
+                "kind": "sale",
+                "description": f"Sale - {BU_LABEL_MAP.get(inv['business_unit'], '')} ({inv.get('invoice_no','')})",
+                "debit": inv["total"], "credit": 0.0,
+                "reference_id": inv["id"], "business_unit": inv["business_unit"],
+                "invoice_no": inv.get("invoice_no", ""),
+            })
+    for p in payments:
+        if _ledger_filter(p["date"], dfrom, dto):
+            allocs = p.get("allocations", []) or []
+            invs = ", ".join(a.get("invoice_no", "") for a in allocs if a.get("invoice_no"))
+            desc = f"Payment via {p.get('method', 'cash')}"
+            if invs: desc += f" → {invs}"
+            entries.append({
+                "date": p.get("date", ""), "created_at": p.get("created_at", ""),
+                "kind": "payment",
+                "description": desc,
+                "debit": 0.0, "credit": float(p.get("amount", 0) or 0),
+                "reference_id": p.get("id", ""),
+                "business_unit": p.get("business_unit", 0),
+                "method": p.get("method", "cash"),
+                "notes": p.get("notes", ""),
+                "allocations": allocs,
+            })
+
+    entries.sort(key=lambda e: (e.get("date", ""), e.get("created_at", "")))
+    running = opening
+    for e in entries:
+        running = running + e["debit"] - e["credit"]
+        e["running_balance"] = round(running, 2)
+
+    total_debit = round(sum(e["debit"] for e in entries), 2)
+    total_credit = round(sum(e["credit"] for e in entries), 2)
+    closing = round(running, 2)
+    total_billed = round(sum(i["total"] for i in invoices), 2)
+    total_paid_all = round(sum(float(p.get("amount", 0) or 0) for p in payments), 2)
+
+    last_purchase = max((i["date"] for i in invoices), default="")
+    last_payment = max((p["date"] for p in payments), default="")
+
+    return {
+        "customer": cust,
+        "from": dfrom, "to": dto,
+        "opening_balance": round(opening, 2),
+        "closing_balance": closing,
+        "total_debit": total_debit,
+        "total_credit": total_credit,
+        "total_billed": total_billed,
+        "total_paid": total_paid_all,
+        "outstanding": float(cust.get("outstanding", 0) or 0),
+        "last_purchase_date": last_purchase,
+        "last_payment_date": last_payment,
+        "entries": entries,
+    }
+
+BU_LABEL_MAP = {1: "Feed", 2: "Hatchery", 3: "Farm", 4: "Water"}
+
+@api.get("/customers/{cid}/ledger")
+async def customer_ledger(cid: str, dfrom: Optional[str] = None, dto: Optional[str] = None,
+                          user=Depends(get_user)):
+    return await _customer_ledger(cid, dfrom, dto)
+
+def _build_statement_pdf(ctx: dict) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    cust = ctx["customer"]
+    buf = io.BytesIO()
+    PAGE_W, PAGE_H = A4
+    c = canvas.Canvas(buf, pagesize=A4)
+    M = 15 * mm
+
+    # Header band
+    c.setFillColor(colors.HexColor("#15803D"))
+    c.rect(0, PAGE_H - 22 * mm, PAGE_W, 22 * mm, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(M, PAGE_H - 11 * mm, BUSINESS_INFO["name"])
+    c.setFont("Helvetica", 9)
+    c.drawString(M, PAGE_H - 17 * mm, BUSINESS_INFO["tagline"])
+    c.setFont("Helvetica-Bold", 13)
+    c.drawRightString(PAGE_W - M, PAGE_H - 11 * mm, "ACCOUNT STATEMENT")
+    c.setFont("Helvetica", 8)
+    period_line = ""
+    if ctx.get("from") or ctx.get("to"):
+        period_line = f"Period: {ctx.get('from') or 'Start'} → {ctx.get('to') or 'Today'}"
+    else:
+        period_line = "Period: All transactions"
+    c.drawRightString(PAGE_W - M, PAGE_H - 17 * mm, period_line)
+
+    y = PAGE_H - 28 * mm
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica", 8)
+    c.drawString(M, y, BUSINESS_INFO["address"])
+    c.drawString(M, y - 4 * mm, f"Phone: {BUSINESS_INFO['phone']}  |  Email: {BUSINESS_INFO['email']}")
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(M, y - 8 * mm, f"GSTIN: {BUSINESS_INFO['gst']}")
+
+    # Customer box
+    y -= 16 * mm
+    c.setStrokeColor(colors.HexColor("#E5E7EB"))
+    c.rect(M, y - 22 * mm, PAGE_W - 2 * M, 22 * mm, fill=0, stroke=1)
+    c.setFont("Helvetica-Bold", 8)
+    c.setFillColor(colors.HexColor("#6B7280"))
+    c.drawString(M + 3 * mm, y - 4 * mm, "BILL TO")
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(M + 3 * mm, y - 9 * mm, cust.get("name", "—"))
+    c.setFont("Helvetica", 9)
+    if cust.get("farm_name") or cust.get("business_name"):
+        c.drawString(M + 3 * mm, y - 13 * mm, cust.get("farm_name") or cust.get("business_name") or "")
+    if cust.get("address"):
+        c.drawString(M + 3 * mm, y - 17 * mm, (cust.get("address") or "")[:80])
+    contact = []
+    if cust.get("phone"): contact.append(f"Phone: {cust['phone']}")
+    if cust.get("gst"): contact.append(f"GSTIN: {cust['gst']}")
+    if contact:
+        c.drawString(M + 3 * mm, y - 21 * mm, " · ".join(contact))
+
+    y -= 28 * mm
+
+    # Summary row
+    box_w = (PAGE_W - 2 * M - 3 * 3 * mm) / 4
+    summaries = [
+        ("Opening Balance", f"Rs. {ctx['opening_balance']:,.2f}", colors.HexColor("#374151")),
+        ("Total Purchases", f"Rs. {ctx['total_debit']:,.2f}", colors.HexColor("#C2410C")),
+        ("Total Payments", f"Rs. {ctx['total_credit']:,.2f}", colors.HexColor("#15803D")),
+        ("Closing Balance", f"Rs. {ctx['closing_balance']:,.2f}", colors.HexColor("#0F172A")),
+    ]
+    x = M
+    for label, val, col in summaries:
+        c.setStrokeColor(colors.HexColor("#E5E7EB"))
+        c.rect(x, y - 14 * mm, box_w, 14 * mm, fill=0, stroke=1)
+        c.setFont("Helvetica", 7)
+        c.setFillColor(colors.HexColor("#6B7280"))
+        c.drawString(x + 2 * mm, y - 4 * mm, label.upper())
+        c.setFont("Helvetica-Bold", 11)
+        c.setFillColor(col)
+        c.drawString(x + 2 * mm, y - 11 * mm, val)
+        x += box_w + 3 * mm
+    c.setFillColor(colors.black)
+    y -= 20 * mm
+
+    # Ledger table
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(M, y, "LEDGER")
+    y -= 5 * mm
+    headers = ["Date", "Description", "Debit", "Credit", "Balance"]
+    cols_x = [M, M + 22 * mm, M + 115 * mm, M + 140 * mm, M + 165 * mm]
+    cols_w = [22 * mm, 93 * mm, 25 * mm, 25 * mm, PAGE_W - M - (M + 165 * mm)]
+
+    def draw_header():
+        c.setFillColor(colors.HexColor("#F3F4F6"))
+        c.rect(M, y - 5 * mm, PAGE_W - 2 * M, 5 * mm, fill=1, stroke=0)
+        c.setFillColor(colors.HexColor("#374151"))
+        c.setFont("Helvetica-Bold", 7.5)
+        c.drawString(cols_x[0] + 1 * mm, y - 3.5 * mm, headers[0])
+        c.drawString(cols_x[1] + 1 * mm, y - 3.5 * mm, headers[1])
+        c.drawRightString(cols_x[2] + cols_w[2] - 1 * mm, y - 3.5 * mm, headers[2])
+        c.drawRightString(cols_x[3] + cols_w[3] - 1 * mm, y - 3.5 * mm, headers[3])
+        c.drawRightString(PAGE_W - M - 1 * mm, y - 3.5 * mm, headers[4])
+        c.setFillColor(colors.black)
+
+    draw_header()
+    y -= 6 * mm
+
+    # Opening balance row
+    c.setFont("Helvetica-Oblique", 8)
+    c.drawString(cols_x[0] + 1 * mm, y, ctx.get("from") or "—")
+    c.drawString(cols_x[1] + 1 * mm, y, "Opening Balance")
+    c.drawRightString(PAGE_W - M - 1 * mm, y, f"Rs. {ctx['opening_balance']:,.2f}")
+    y -= 5 * mm
+
+    c.setFont("Helvetica", 8)
+    for e in ctx["entries"]:
+        if y < 25 * mm:
+            c.showPage()
+            y = PAGE_H - M
+            draw_header()
+            y -= 6 * mm
+        c.drawString(cols_x[0] + 1 * mm, y, e["date"] or "—")
+        desc = e["description"][:60]
+        c.drawString(cols_x[1] + 1 * mm, y, desc)
+        if e["debit"] > 0:
+            c.setFillColor(colors.HexColor("#C2410C"))
+            c.drawRightString(cols_x[2] + cols_w[2] - 1 * mm, y, f"{e['debit']:,.2f}")
+            c.setFillColor(colors.black)
+        if e["credit"] > 0:
+            c.setFillColor(colors.HexColor("#15803D"))
+            c.drawRightString(cols_x[3] + cols_w[3] - 1 * mm, y, f"{e['credit']:,.2f}")
+            c.setFillColor(colors.black)
+        c.drawRightString(PAGE_W - M - 1 * mm, y, f"{e['running_balance']:,.2f}")
+        y -= 4.5 * mm
+
+    # Closing
+    if y < 30 * mm:
+        c.showPage(); y = PAGE_H - M
+    y -= 4 * mm
+    c.setStrokeColor(colors.HexColor("#E5E7EB"))
+    c.line(M, y, PAGE_W - M, y)
+    y -= 5 * mm
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(cols_x[1] + 1 * mm, y, "CLOSING BALANCE")
+    c.setFillColor(colors.HexColor("#15803D") if ctx['closing_balance'] <= 0 else colors.HexColor("#C2410C"))
+    c.drawRightString(PAGE_W - M - 1 * mm, y, f"Rs. {ctx['closing_balance']:,.2f}")
+    c.setFillColor(colors.black)
+
+    # Footer
+    y_footer = 15 * mm
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColor(colors.HexColor("#15803D"))
+    c.drawString(M, y_footer + 5 * mm, "Thank you for your business")
+    c.setFillColor(colors.HexColor("#6B7280"))
+    c.setFont("Helvetica", 6.5)
+    c.drawString(M, y_footer, f"This is a computer-generated statement  •  {BUSINESS_INFO['name']}")
+    c.setStrokeColor(colors.HexColor("#9CA3AF"))
+    c.line(PAGE_W - M - 50 * mm, y_footer + 5 * mm, PAGE_W - M, y_footer + 5 * mm)
+    c.setFont("Helvetica", 7)
+    c.setFillColor(colors.HexColor("#6B7280"))
+    c.drawRightString(PAGE_W - M, y_footer + 1 * mm, "Authorised Signatory")
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+@api.get("/customers/{cid}/statement/pdf")
+async def customer_statement_pdf(cid: str, dfrom: Optional[str] = None, dto: Optional[str] = None,
+                                 user=Depends(get_user)):
+    ctx = await _customer_ledger(cid, dfrom, dto)
+    pdf_bytes = _build_statement_pdf(ctx)
+    name = (ctx["customer"].get("name") or "customer").replace(" ", "_")
+    fname = f"Statement-{name}.pdf"
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{fname}"'})
+
+
+@api.get("/customers/{cid}/statement/print", response_class=HTMLResponse)
+async def customer_statement_print(cid: str, request: Request,
+                                   dfrom: Optional[str] = None, dto: Optional[str] = None,
+                                   user=Depends(get_user)):
+    qs = ""
+    if dfrom or dto:
+        parts = []
+        if dfrom: parts.append(f"dfrom={dfrom}")
+        if dto: parts.append(f"dto={dto}")
+        qs = "?" + "&".join(parts)
+    pdf_url = f"/api/customers/{cid}/statement/pdf{qs}"
+    html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Print Statement</title>
+<style>html,body{{margin:0;padding:0;height:100%;background:#f3f4f6;font-family:system-ui}}
+iframe{{width:100%;height:100vh;border:0;background:#fff}}
+.bar{{position:fixed;top:8px;right:8px;z-index:10}}
+.bar button{{background:#15803D;color:#fff;border:0;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer}}
+</style></head><body>
+<div class="bar"><button onclick="doPrint()">Print Again</button></div>
+<iframe id="pdf" src="{pdf_url}"></iframe>
+<script>
+function doPrint(){{const f=document.getElementById('pdf');try{{f.contentWindow.focus();f.contentWindow.print();}}catch(e){{window.print();}}}}
+document.getElementById('pdf').addEventListener('load',function(){{setTimeout(doPrint,600);}});
+</script></body></html>"""
+    return HTMLResponse(content=html)
+
+
+@api.post("/customers/{cid}/statement/share")
+async def customer_statement_share(cid: str, request: Request,
+                                   dfrom: Optional[str] = None, dto: Optional[str] = None,
+                                   user=Depends(get_user)):
+    ctx = await _customer_ledger(cid, dfrom, dto)
+    cust = ctx["customer"]
+    base = str(request.base_url).rstrip("/")
+    qs = ""
+    if dfrom or dto:
+        parts = []
+        if dfrom: parts.append(f"dfrom={dfrom}")
+        if dto: parts.append(f"dto={dto}")
+        qs = "?" + "&".join(parts)
+    pdf_url = f"{base}/api/customers/{cid}/statement/pdf{qs}"
+    msg = (
+        f"Hello {cust.get('name','Customer')},\n\n"
+        f"Please find your account statement from {BUSINESS_INFO['name']}.\n\n"
+        f"Period: {ctx.get('from') or 'Start'} → {ctx.get('to') or 'Today'}\n"
+        f"Total Purchases: Rs. {ctx['total_debit']:,.2f}\n"
+        f"Total Payments: Rs. {ctx['total_credit']:,.2f}\n"
+        f"Outstanding Balance: Rs. {ctx['closing_balance']:,.2f}\n\n"
+        f"Statement PDF: {pdf_url}\n\nThank you for your business."
+    )
+    phone_raw = "".join(ch for ch in (cust.get("phone") or "") if ch.isdigit())
+    if phone_raw and not phone_raw.startswith("91") and len(phone_raw) == 10:
+        phone_raw = "91" + phone_raw
+    whatsapp_url = (f"https://wa.me/{phone_raw}?text={quote(msg)}"
+                    if phone_raw else f"https://wa.me/?text={quote(msg)}")
+    subject = f"Account Statement — {cust.get('name','Customer')}"
+    mailto_url = f"mailto:{quote(cust.get('email',''))}?subject={quote(subject)}&body={quote(msg)}"
+    return {"whatsapp_url": whatsapp_url, "mailto_url": mailto_url, "pdf_url": pdf_url}
+
+
+# ============ Reports ============
+def _within(s: dict, dfrom: Optional[str], dto: Optional[str], key: str = "date") -> bool:
+    d = (s.get(key) or "")[:10]
+    if dfrom and d < dfrom: return False
+    if dto and d > dto: return False
+    return True
+
+@api.get("/reports/sales")
+async def report_sales(dfrom: Optional[str] = None, dto: Optional[str] = None,
+                       customer_id: Optional[str] = None, business_unit: Optional[int] = None,
+                       user=Depends(get_user)):
+    rows = []
+    by_bu = {1: 0, 2: 0, 3: 0, 4: 0}
+    by_status = {"paid": 0, "partial": 0, "pending": 0}
+    for coll_name, bu, _pref in SALE_COLLECTIONS:
+        if business_unit and business_unit != bu: continue
+        q = {}
+        if customer_id: q["customer_id"] = customer_id
+        sales = await db[coll_name].find(q, {"_id": 0}).to_list(20000)
+        for s in sales:
+            if not _within(s, dfrom, dto): continue
+            row = {
+                "id": s["id"],
+                "invoice_no": s.get("invoice_no", ""),
+                "date": _to_date(s.get("date", "")),
+                "customer_id": s.get("customer_id", ""),
+                "customer_name": s.get("customer_name", ""),
+                "business_unit": bu, "sale_type": coll_name,
+                "total": float(s.get("total", 0) or 0),
+                "amount_paid": float(s.get("amount_paid", 0) or 0),
+                "balance_due": float(s.get("balance_due", 0) or 0),
+                "payment_status": s.get("payment_status", "pending"),
+            }
+            rows.append(row)
+            by_bu[bu] += row["total"]
+            ps = row["payment_status"]
+            if ps in by_status: by_status[ps] += row["total"]
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    total = sum(r["total"] for r in rows)
+    paid = sum(r["amount_paid"] for r in rows)
+    due = sum(r["balance_due"] for r in rows)
+    return {"rows": rows, "summary": {"count": len(rows),
+            "total": round(total, 2), "paid": round(paid, 2), "due": round(due, 2),
+            "by_business_unit": {k: round(v, 2) for k, v in by_bu.items()},
+            "by_status": {k: round(v, 2) for k, v in by_status.items()}}}
+
+
+@api.get("/reports/purchases")
+async def report_purchases(dfrom: Optional[str] = None, dto: Optional[str] = None,
+                           supplier_id: Optional[str] = None, business_unit: Optional[int] = None,
+                           user=Depends(get_user)):
+    rows = []
+    pcollections = [
+        ("feed_purchases", 1, "feed_item_id"),
+        ("egg_purchases", 2, None),
+    ]
+    for coll_name, bu, _ in pcollections:
+        if business_unit and business_unit != bu: continue
+        q = {}
+        if supplier_id: q["supplier_id"] = supplier_id
+        purs = await db[coll_name].find(q, {"_id": 0}).to_list(20000)
+        for p in purs:
+            if not _within(p, dfrom, dto): continue
+            total = float(p.get("total", 0) or 0)
+            if not total:
+                total = float(p.get("quantity", 0) or 0) * float(p.get("purchase_rate", p.get("rate", 0)) or 0) + float(p.get("transport", 0) or 0)
+            sup = await db.suppliers.find_one({"id": p.get("supplier_id")}, {"name": 1, "_id": 0}) or {}
+            rows.append({
+                "id": p["id"], "date": _to_date(p.get("date", "")),
+                "business_unit": bu, "type": coll_name,
+                "supplier_id": p.get("supplier_id", ""),
+                "supplier_name": sup.get("name", ""),
+                "quantity": float(p.get("quantity", 0) or 0),
+                "rate": float(p.get("purchase_rate", p.get("rate", 0)) or 0),
+                "transport": float(p.get("transport", 0) or 0),
+                "total": round(total, 2),
+            })
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    total = sum(r["total"] for r in rows)
+    return {"rows": rows, "summary": {"count": len(rows), "total": round(total, 2)}}
+
+
+@api.get("/reports/payments")
+async def report_payments(dfrom: Optional[str] = None, dto: Optional[str] = None,
+                          customer_id: Optional[str] = None, user=Depends(get_user)):
+    q = {"party_type": "customer"}
+    if customer_id:
+        q = {"$and": [{"$or": [{"customer_id": customer_id}, {"party_id": customer_id}]},
+                      {"$or": [{"party_type": "customer"}, {"customer_id": {"$ne": None}}]}]}
+    pays = await db.payments.find(q, {"_id": 0}).to_list(20000)
+    rows = []
+    by_method = {}
+    for p in pays:
+        if not _within(p, dfrom, dto): continue
+        amt = float(p.get("amount", 0) or 0)
+        m = (p.get("method") or "cash").lower()
+        by_method[m] = round(by_method.get(m, 0) + amt, 2)
+        rows.append({
+            "id": p.get("id", ""),
+            "date": _to_date(p.get("date", "")),
+            "customer_id": p.get("customer_id") or p.get("party_id"),
+            "customer_name": p.get("party_name", ""),
+            "amount": amt,
+            "applied_amount": float(p.get("applied_amount", amt) or 0),
+            "advance_amount": float(p.get("advance_amount", 0) or 0),
+            "method": p.get("method", "cash"),
+            "notes": p.get("notes", ""),
+            "allocations": p.get("allocations", []) or [],
+        })
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return {"rows": rows, "summary": {"count": len(rows),
+        "total": round(sum(r["amount"] for r in rows), 2),
+        "by_method": by_method}}
+
+
+@api.get("/reports/stock")
+async def report_stock(user=Depends(get_user)):
+    feed_items = await db.feed_items.find({}, {"_id": 0}).to_list(5000)
+    feed_rows = [{
+        "id": f["id"], "business_unit": 1, "name": f.get("name", ""),
+        "brand": f.get("brand", ""), "unit": f.get("unit", "kg"),
+        "current_stock": float(f.get("current_stock", 0) or 0),
+        "weighted_avg_cost": float(f.get("weighted_avg_cost", 0) or 0),
+        "stock_value": round(float(f.get("current_stock", 0) or 0) * float(f.get("weighted_avg_cost", 0) or 0), 2),
+    } for f in feed_items]
+    batches = await db.poultry_batches.find({}, {"_id": 0}).to_list(5000)
+    batch_rows = [{
+        "id": b["id"], "business_unit": 2, "batch_no": b.get("batch_no", ""),
+        "hatched_chicks": int(b.get("hatched_chicks", 0) or 0),
+        "sold": int(b.get("sold", 0) or 0),
+        "transferred": int(b.get("transferred", 0) or 0),
+        "available": int(b.get("hatched_chicks", 0) or 0) - int(b.get("sold", 0) or 0) - int(b.get("transferred", 0) or 0),
+        "status": b.get("status", ""),
+    } for b in batches]
+    farm_stock = await db.farm_stock.find({}, {"_id": 0}).to_list(5000)
+    farm_rows = [{
+        "id": s["id"], "business_unit": 3, "date": s.get("date", ""),
+        "current_count": int(s.get("current_count", 0) or 0),
+        "source": s.get("source", "transfer"),
+    } for s in farm_stock]
+    tanks = await db.water_tanks.find({}, {"_id": 0}).to_list(5000)
+    water_rows = [{
+        "id": t["id"], "business_unit": 4, "name": t.get("name", ""),
+        "capacity": float(t.get("capacity", 0) or 0),
+        "current_liters": float(t.get("current_liters", 0) or 0),
+    } for t in tanks]
+    return {
+        "feed": feed_rows, "hatchery": batch_rows,
+        "farm": farm_rows, "water": water_rows,
+        "summary": {
+            "feed_value": round(sum(r["stock_value"] for r in feed_rows), 2),
+            "available_chicks": sum(r["available"] for r in batch_rows),
+            "farm_birds": sum(r["current_count"] for r in farm_rows),
+            "water_liters": round(sum(r["current_liters"] for r in water_rows), 2),
+        }
+    }
+
+
+@api.get("/reports/bu-summary")
+async def report_bu_summary(dfrom: Optional[str] = None, dto: Optional[str] = None,
+                            user=Depends(get_user)):
+    out = {}
+    for coll_name, bu, _ in SALE_COLLECTIONS:
+        rows = await db[coll_name].find({}, {"_id": 0}).to_list(20000)
+        rev = paid = due = 0.0
+        cnt = 0
+        for r in rows:
+            if not _within(r, dfrom, dto): continue
+            rev += float(r.get("total", 0) or 0)
+            paid += float(r.get("amount_paid", 0) or 0)
+            due += float(r.get("balance_due", 0) or 0)
+            cnt += 1
+        out[f"bu{bu}"] = {
+            "business_unit": bu, "label": BU_LABEL_MAP[bu],
+            "sales_count": cnt,
+            "revenue": round(rev, 2),
+            "collected": round(paid, 2),
+            "outstanding": round(due, 2),
+        }
+    # finance pnl in range
+    fin = await db.finance_transactions.find({}, {"_id": 0}).to_list(50000)
+    inc = exp = 0.0
+    for t in fin:
+        if not _within(t, dfrom, dto): continue
+        if t.get("type") == "income": inc += float(t.get("amount", 0) or 0)
+        elif t.get("type") == "expense": exp += float(t.get("amount", 0) or 0)
+    out["combined"] = {"income": round(inc, 2), "expense": round(exp, 2),
+                       "profit": round(inc - exp, 2)}
+    return out
+
+
+@api.get("/reports/excel")
+async def report_excel(kind: str,
+                       dfrom: Optional[str] = None, dto: Optional[str] = None,
+                       customer_id: Optional[str] = None,
+                       supplier_id: Optional[str] = None,
+                       business_unit: Optional[int] = None,
+                       user=Depends(get_user)):
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+
+    def _set_headers(headers):
+        ws.append(headers)
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=1, column=col).font = ws.cell(row=1, column=col).font.copy(bold=True)
+
+    fname = f"{kind}-report.xlsx"
+    if kind == "sales":
+        ws.title = "Sales"
+        data = await report_sales(dfrom, dto, customer_id, business_unit, user=user)
+        _set_headers(["Invoice", "Date", "Customer", "BU", "Total", "Paid", "Due", "Status"])
+        for r in data["rows"]:
+            ws.append([r["invoice_no"], r["date"], r["customer_name"],
+                       BU_LABEL_MAP.get(r["business_unit"], r["business_unit"]),
+                       r["total"], r["amount_paid"], r["balance_due"], r["payment_status"]])
+    elif kind == "purchases":
+        ws.title = "Purchases"
+        data = await report_purchases(dfrom, dto, supplier_id, business_unit, user=user)
+        _set_headers(["Date", "Supplier", "BU", "Qty", "Rate", "Transport", "Total"])
+        for r in data["rows"]:
+            ws.append([r["date"], r["supplier_name"], BU_LABEL_MAP.get(r["business_unit"], r["business_unit"]),
+                       r["quantity"], r["rate"], r["transport"], r["total"]])
+    elif kind == "payments":
+        ws.title = "Payments"
+        data = await report_payments(dfrom, dto, customer_id, user=user)
+        _set_headers(["Date", "Customer", "Amount", "Method", "Applied", "Advance", "Notes"])
+        for r in data["rows"]:
+            ws.append([r["date"], r["customer_name"], r["amount"], r["method"],
+                       r["applied_amount"], r["advance_amount"], r["notes"]])
+    elif kind == "outstanding":
+        ws.title = "Outstanding"
+        custs = await db.customers.find({"outstanding": {"$gt": 0}}, {"_id": 0}).to_list(20000)
+        _set_headers(["Customer", "Phone", "Credit Limit", "Outstanding"])
+        for c in sorted(custs, key=lambda x: x.get("outstanding", 0), reverse=True):
+            ws.append([c.get("name", ""), c.get("phone", ""),
+                       float(c.get("credit_limit", 0) or 0), float(c.get("outstanding", 0) or 0)])
+    elif kind == "stock":
+        data = await report_stock(user=user)
+        ws.title = "Feed Stock"
+        _set_headers(["Name", "Brand", "Unit", "Current", "Avg Cost", "Value"])
+        for r in data["feed"]:
+            ws.append([r["name"], r["brand"], r["unit"], r["current_stock"],
+                       r["weighted_avg_cost"], r["stock_value"]])
+        ws2 = wb.create_sheet("Hatchery"); ws2.append(["Batch", "Hatched", "Sold", "Transferred", "Available", "Status"])
+        for r in data["hatchery"]:
+            ws2.append([r["batch_no"], r["hatched_chicks"], r["sold"], r["transferred"], r["available"], r["status"]])
+        ws3 = wb.create_sheet("Farm"); ws3.append(["Date", "Birds", "Source"])
+        for r in data["farm"]:
+            ws3.append([r["date"], r["current_count"], r["source"]])
+        ws4 = wb.create_sheet("Water"); ws4.append(["Tank", "Capacity", "Current"])
+        for r in data["water"]:
+            ws4.append([r["name"], r["capacity"], r["current_liters"]])
+    elif kind == "bu-summary":
+        ws.title = "BU Summary"
+        data = await report_bu_summary(dfrom, dto, user=user)
+        _set_headers(["BU", "Sales Count", "Revenue", "Collected", "Outstanding"])
+        for k, v in data.items():
+            if k == "combined": continue
+            ws.append([v["label"], v["sales_count"], v["revenue"], v["collected"], v["outstanding"]])
+    elif kind == "pnl":
+        ws.title = "P&L"
+        data = await report_bu_summary(dfrom, dto, user=user)
+        _set_headers(["Metric", "Value"])
+        ws.append(["Income", data["combined"]["income"]])
+        ws.append(["Expense", data["combined"]["expense"]])
+        ws.append(["Profit", data["combined"]["profit"]])
+    else:
+        raise HTTPException(400, f"Unknown report kind: {kind}")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+# ============ Dashboard widgets (top customers, recents) ============
+@api.get("/dashboard/top-customers")
+async def dashboard_top_customers(by: str = "outstanding", limit: int = 5,
+                                  user=Depends(get_user)):
+    if by == "revenue":
+        # aggregate revenue per customer from sales
+        totals = {}
+        for coll_name, _bu, _pref in SALE_COLLECTIONS:
+            rows = await db[coll_name].find({}, {"customer_id": 1, "customer_name": 1, "total": 1, "_id": 0}).to_list(50000)
+            for r in rows:
+                cid = r.get("customer_id")
+                if not cid: continue
+                d = totals.setdefault(cid, {"id": cid, "name": r.get("customer_name", ""), "revenue": 0.0})
+                d["revenue"] += float(r.get("total", 0) or 0)
+        ranked = sorted(totals.values(), key=lambda x: x["revenue"], reverse=True)[:limit]
+        for r in ranked: r["revenue"] = round(r["revenue"], 2)
+        return ranked
+    # default by outstanding
+    custs = await db.customers.find({"outstanding": {"$gt": 0}}, {"_id": 0}).sort("outstanding", -1).limit(limit).to_list(limit)
+    return [{"id": c["id"], "name": c.get("name", ""),
+             "phone": c.get("phone", ""),
+             "outstanding": float(c.get("outstanding", 0) or 0)} for c in custs]
+
+
+@api.get("/dashboard/recent-payments")
+async def dashboard_recent_payments(limit: int = 10, user=Depends(get_user)):
+    rows = await db.payments.find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    return rows
+
+
+@api.get("/dashboard/recent-sales")
+async def dashboard_recent_sales(limit: int = 10, user=Depends(get_user)):
+    combined = []
+    for coll_name, bu, _ in SALE_COLLECTIONS:
+        rows = await db[coll_name].find({}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+        for r in rows:
+            combined.append({
+                "id": r["id"], "invoice_no": r.get("invoice_no", ""),
+                "date": _to_date(r.get("date", "")),
+                "created_at": r.get("created_at", ""),
+                "customer_name": r.get("customer_name", ""),
+                "business_unit": bu, "sale_type": coll_name,
+                "total": float(r.get("total", 0) or 0),
+                "payment_status": r.get("payment_status", "pending"),
+            })
+    combined.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return combined[:limit]
+
+
 # ============ Startup ============
 app.include_router(api)
 app.add_middleware(CORSMiddleware, allow_credentials=True,

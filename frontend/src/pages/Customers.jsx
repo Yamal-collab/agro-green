@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api, { formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
@@ -15,11 +16,11 @@ const empty = { name: "", business_name: "", phone: "", email: "", address: "", 
 
 export default function Customers() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(empty);
   const [search, setSearch] = useState("");
   const [error, setError] = useState("");
-  const [detailId, setDetailId] = useState(null);
 
   const { data: customers = [] } = useQuery({
     queryKey: ["customers"],
@@ -79,7 +80,9 @@ export default function Customers() {
           <tbody>
             {filtered.map((c) => (
               <tr key={c.id} className="border-t border-border hover:bg-background/60" data-testid={`customer-row-${c.id}`}>
-                <td className="py-3 px-4 font-semibold">{c.name}</td>
+                <td className="py-3 px-4 font-semibold">
+                  <Link to={`/customers/${c.id}`} className="text-primary hover:underline" data-testid={`customer-link-${c.id}`}>{c.name}</Link>
+                </td>
                 <td className="text-muted-foreground">{c.business_name || c.farm_name || "—"}</td>
                 <td className="font-mono text-xs">{c.phone || "—"}</td>
                 <td className="text-right">{currency(c.credit_limit)}</td>
@@ -91,9 +94,9 @@ export default function Customers() {
                 <td className="text-center px-4">
                   <button
                     data-testid={`customer-details-${c.id}`}
-                    onClick={() => setDetailId(c.id)}
+                    onClick={() => navigate(`/customers/${c.id}`)}
                     className="p-1.5 rounded hover:bg-secondary text-primary"
-                    title="View invoices and payment history"
+                    title="View account, invoices and statement"
                   ><Eye className="h-4 w-4" /></button>
                 </td>
               </tr>
@@ -151,131 +154,6 @@ export default function Customers() {
           </div>
         </div>
       )}
-      {detailId && <CustomerDetail customerId={detailId} onClose={() => setDetailId(null)} />}
-    </div>
-  );
-}
-
-function CustomerDetail({ customerId, onClose }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["customer-details", customerId],
-    queryFn: async () => (await api.get(`/customers/${customerId}/details`)).data,
-  });
-  return (
-    <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" data-testid="customer-detail-dialog">
-      <div className="bg-white rounded-lg w-full max-w-3xl p-6 border border-border max-h-[90vh] overflow-y-auto">
-        <div className="flex justify-between items-start mb-4">
-          <div>
-            <h2 className="text-xl font-bold" style={{ fontFamily: "var(--font-heading)" }}>
-              {data?.customer?.name || "Customer Details"}
-            </h2>
-            <p className="text-xs text-muted-foreground mt-1">
-              {data?.customer?.business_name || data?.customer?.farm_name || ""}
-              {data?.customer?.phone ? ` · ${data.customer.phone}` : ""}
-            </p>
-          </div>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        {isLoading || !data ? (
-          <div className="py-12 text-center text-sm text-muted-foreground">Loading…</div>
-        ) : (
-          <>
-            <div className="grid grid-cols-3 gap-3 mb-5">
-              <SummaryCard label="Total Billed" value={currency(data.summary.total_billed)} />
-              <SummaryCard label="Total Paid" value={currency(data.summary.total_paid)} color="#15803D" />
-              <SummaryCard label="Outstanding" value={currency(data.summary.total_due)} color="#C2410C" />
-            </div>
-
-            <h3 className="font-bold text-sm mb-2">Invoices</h3>
-            <div className="border border-border rounded-md overflow-hidden mb-5">
-              <table className="w-full text-sm" data-testid="customer-invoices-table">
-                <thead className="bg-secondary text-muted-foreground">
-                  <tr className="text-[10px] uppercase tracking-wider">
-                    <th className="text-left py-2 px-3">Invoice</th>
-                    <th className="text-left py-2">Date</th>
-                    <th className="text-left py-2">BU</th>
-                    <th className="text-right py-2">Total</th>
-                    <th className="text-right py-2">Paid</th>
-                    <th className="text-right py-2">Due</th>
-                    <th className="text-center py-2 px-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.invoices.map(i => (
-                    <tr key={i.id} className="border-t border-border">
-                      <td className="py-2 px-3 font-mono text-xs">{i.invoice_no || "—"}</td>
-                      <td className="text-xs">{i.date}</td>
-                      <td className="text-xs">{BU_LABEL[i.business_unit] || i.business_unit}</td>
-                      <td className="text-right">{currency(i.total)}</td>
-                      <td className="text-right text-[#15803D]">{currency(i.amount_paid)}</td>
-                      <td className="text-right font-semibold text-[#C2410C]">{currency(i.balance_due)}</td>
-                      <td className="text-center px-3">
-                        <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-semibold ${statusBadge(i.payment_status)}`}>
-                          {i.payment_status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {data.invoices.length === 0 && (
-                    <tr><td colSpan={7} className="py-6 text-center text-xs text-muted-foreground">No invoices</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <h3 className="font-bold text-sm mb-2">Payment History</h3>
-            <div className="border border-border rounded-md overflow-hidden">
-              <table className="w-full text-sm" data-testid="customer-payments-table">
-                <thead className="bg-secondary text-muted-foreground">
-                  <tr className="text-[10px] uppercase tracking-wider">
-                    <th className="text-left py-2 px-3">Date</th>
-                    <th className="text-left py-2">Method</th>
-                    <th className="text-left py-2">Notes</th>
-                    <th className="text-left py-2">Applied To</th>
-                    <th className="text-right py-2 px-3">Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.payments.map(p => (
-                    <tr key={p.id} className="border-t border-border align-top">
-                      <td className="py-2 px-3 text-xs">{p.date}</td>
-                      <td className="capitalize text-xs">{p.method}</td>
-                      <td className="text-xs text-muted-foreground">{p.notes || "—"}</td>
-                      <td className="text-xs">
-                        {(p.allocations || []).map((a) => (
-                          <div key={a.sale_id}>
-                            <span className="font-mono">{a.invoice_no}</span>
-                            <span className="text-muted-foreground"> · {currency(a.amount_applied)} → {a.new_status}</span>
-                          </div>
-                        ))}
-                        {p.advance_amount > 0 && (
-                          <div className="text-[#0284C7]">Advance: {currency(p.advance_amount)}</div>
-                        )}
-                      </td>
-                      <td className="text-right px-3 font-semibold text-[#15803D]">{currency(p.amount)}</td>
-                    </tr>
-                  ))}
-                  {data.payments.length === 0 && (
-                    <tr><td colSpan={5} className="py-6 text-center text-xs text-muted-foreground">No payments yet</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SummaryCard({ label, value, color }) {
-  return (
-    <div className="bg-white border border-border rounded-md p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">{label}</div>
-      <div className="text-lg font-bold mt-1" style={color ? { color } : undefined}>{value}</div>
     </div>
   );
 }

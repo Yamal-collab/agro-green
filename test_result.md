@@ -7,15 +7,15 @@
 #====================================================================================================
 
 user_problem_statement: |
-  Bug fix: POST /api/payments returned 422. Implement full customer payment
-  workflow with FIFO allocation across all 4 business units, auto-update of
-  invoice payment_status, amount_paid, balance_due, customer outstanding,
-  finance totals and dashboard. Customer detail page should show invoices and
-  payment history. Do NOT change sale workflow, stock deduction, inventory,
-  invoice generation, or PDF/print/share.
+  Implement Customer Account Statement & Reports module on top of existing
+  AgriBiz ERP. New customer detail page with Summary/Purchases/Payments/Ledger
+  tabs; A4 statement PDF, print, share. Reports module with Sales/Purchases/
+  Payments/Outstanding/Stock/P&L/BU Summary plus filters and Excel export.
+  Dashboard top customers and recent payments/sales. Do NOT break existing
+  payment, invoice, sale, finance or PDF flows.
 
 backend:
-  - task: "POST /api/payments accepts customer_id (FIFO allocation)"
+  - task: "GET /api/customers/{id}/ledger"
     implemented: true
     working: true
     file: "backend/server.py"
@@ -25,11 +25,11 @@ backend:
     status_history:
         -working: true
         -agent: "main"
-        -comment: "PaymentIn now accepts customer_id (party_id legacy kept). FIFO allocates across feed_sales/chick_sales/farm_sales/water_sales sorted by created_at. Updates amount_paid/balance_due/payment_status. Overpayment becomes advance. Verified via curl - 422 returned only with helpful message when customer_id missing or amount<=0."
+        -comment: "Returns customer, entries (debit/credit), opening_balance, closing_balance, totals, last dates. Date range filter via dfrom/dto."
         -working: true
         -agent: "testing"
-        -comment: "Comprehensive testing completed. All 35 tests passed. Validated: (1) 422 validations - missing customer_id, zero/negative amount, non-existent customer all return correct error codes and messages. (2) FIFO allocation - created 3 invoices (Feed ₹2000, Chick ₹3000, Farm ₹5000) totaling ₹10000. (3) Partial payment ₹1500 - correctly allocated to oldest invoice, status='partial', balance=₹500, outstanding=₹8500. (4) Cascade payment ₹4000 - correctly allocated across 3 invoices (Feed ₹500→paid, Chick ₹3000→paid, Farm ₹500→partial), outstanding=₹4500. (5) Overpayment ₹10000 - correctly allocated ₹4500 to remaining balance, advance=₹5500, outstanding=₹0. (6) All invoices show payment_status='paid' and balance_due=0 after full payment. (7) Dashboard outstanding field working. (8) Customer details endpoint returns correct structure with invoices, payments, and summary totals. (9) Finance transactions created for all payments. (10) No regression - new sales and PDF generation still working."
-  - task: "Sales store amount_paid / balance_due / business_unit / payment_status"
+        -comment: "✅ PASS: All ledger tests passed. Verified structure with customer, entries (date, kind, debit, credit, running_balance, description), opening_balance, closing_balance, total_debit, total_credit, total_billed, total_paid, outstanding, last_purchase_date, last_payment_date. Entries sorted by date ascending. Last running_balance equals closing_balance. Closing_balance matches customer.outstanding within ±1.0 rupee. Date filters (dfrom/dto) working correctly - opening_balance accounts for activity before dfrom, entries filtered within range."
+  - task: "GET /api/customers/{id}/statement/pdf + /print + share"
     implemented: true
     working: true
     file: "backend/server.py"
@@ -39,11 +39,11 @@ backend:
     status_history:
         -working: true
         -agent: "main"
-        -comment: "feed_sale, chick_sale, farm_sale, water_sale create handlers now persist amount_paid, balance_due, business_unit, payment_status. Startup migration backfills legacy docs. Customer outstanding recomputed from sum of balance_due."
+        -comment: "A4 portrait ReportLab statement: opening, ledger table, closing, totals. Print HTML auto-triggers. Share returns whatsapp_url/mailto_url with PDF link."
         -working: true
         -agent: "testing"
-        -comment: "Verified all sale endpoints (feed_sales, chick_sales, farm_sales) correctly store and update amount_paid, balance_due, business_unit, and payment_status fields. Payment workflow correctly updates these fields during FIFO allocation. All invoices show correct status transitions (pending→partial→paid) and accurate balance calculations."
-  - task: "GET /api/customers/{id}/details (invoices + payments)"
+        -comment: "✅ PASS: All statement tests passed. PDF endpoint returns valid PDF (Content-Type: application/pdf, starts with %PDF-). Print endpoint returns HTML with iframe pointing to PDF endpoint. Share endpoint returns whatsapp_url (starts with https://wa.me/), mailto_url (starts with mailto:), and pdf_url."
+  - task: "Reports endpoints"
     implemented: true
     working: true
     file: "backend/server.py"
@@ -53,52 +53,70 @@ backend:
     status_history:
         -working: true
         -agent: "main"
-        -comment: "Returns customer, all invoices across BUs, payment history with allocations, and totals summary."
+        -comment: "/reports/sales /purchases /payments /stock /bu-summary; /reports/excel kind=sales|purchases|payments|outstanding|stock|bu-summary|pnl with filters dfrom/dto/customer_id/supplier_id/business_unit."
         -working: true
         -agent: "testing"
-        -comment: "Endpoint working perfectly. Returns complete customer object, all invoices across all BUs with correct payment status, all payment records with detailed allocations, and accurate summary (total_billed=₹10000, total_paid=₹10000, total_due=₹0). All data structures match expected format."
+        -comment: "✅ PASS: All reports tests passed. Sales report: summary.count matches rows length, rows have invoice_no/business_unit/total/amount_paid/balance_due/payment_status, filters by customer_id/business_unit/date working correctly. Purchases report: has summary and rows with supplier_name/business_unit/total. Payments report: has summary with count/total/by_method dict, rows with allocations. Stock report: has feed/hatchery/farm/water/summary keys. BU Summary: has bu1-bu4 with sales_count/revenue/collected/outstanding, combined with income/expense/profit. Excel export: returns correct Content-Type (spreadsheetml/xlsx), first 2 bytes are 'PK' (zip magic), tested for sales and outstanding kinds."
+  - task: "Dashboard top-customers / recent-payments / recent-sales"
+    implemented: true
+    working: true
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "/dashboard/top-customers?by=revenue|outstanding, /dashboard/recent-payments, /dashboard/recent-sales."
+        -working: true
+        -agent: "testing"
+        -comment: "✅ PASS: All dashboard tests passed. Top customers by outstanding: returns list (≤5), sorted by outstanding desc, items have id/name/outstanding. Top customers by revenue: returns list (≤5), sorted by revenue desc, items have id/name/revenue. Recent payments: returns list with party_name/amount/date/method. Recent sales: returns list with invoice_no/customer_name/business_unit/total."
 
 frontend:
-  - task: "Record Payment dialog → no 422; success toast"
+  - task: "Customer Detail page (/customers/:id) with tabs and statement actions"
     implemented: true
     working: "NA"
-    file: "frontend/src/pages/Finance.jsx"
+    file: "frontend/src/pages/CustomerDetail.jsx"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "Send customer_id; show success banner with allocation count and advance; dropdown labelled 'Name (₹X Due)' sorted by outstanding desc; validate amount > 0 before submit."
-  - task: "Customer detail modal with invoices + payment history"
+        -comment: "Dedicated page replacing modal. Tabs Summary/Purchases/Payments/Ledger. View/Print/Share statement buttons. Customers list links to /customers/:id."
+  - task: "Reports tabs with filters and Excel"
     implemented: true
     working: "NA"
-    file: "frontend/src/pages/Customers.jsx"
+    file: "frontend/src/pages/Reports.jsx"
     stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
         -working: "NA"
         -agent: "main"
-        -comment: "Eye icon on each row opens modal showing summary, all invoices (status badges) and payment history with FIFO allocations."
+        -comment: "Report kind selector + date/customer/BU filters; Print and Excel export buttons."
+  - task: "Dashboard top customers + recent payments/sales"
+    implemented: true
+    working: "NA"
+    file: "frontend/src/pages/Dashboard.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
 
 metadata:
   created_by: "main_agent"
-  version: "1.2"
-  test_sequence: 3
+  version: "1.3"
+  test_sequence: 4
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "POST /api/payments accepts customer_id (FIFO allocation)"
-    - "Sales store amount_paid / balance_due / business_unit / payment_status"
-    - "GET /api/customers/{id}/details (invoices + payments)"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
 agent_communication:
     -agent: "main"
-    -message: "Payment workflow rewritten. FIFO across all 4 BUs, auto status update, customer outstanding recomputed from balance_due, advance stored when overpayment. Migration on startup backfills legacy sales. Need backend testing to validate."
+    -message: "Added statement, ledger, reports and excel endpoints plus dashboard widgets. Need backend testing for ledger correctness, statement PDF validity, reports filtering, Excel content-type, and dashboard top-customer endpoints. CRITICAL: verify existing payment + invoice flows untouched."
     -agent: "testing"
-    -message: "Backend testing completed successfully. All 35 tests passed covering all 10 scenarios: (1) 422 validations working correctly, (2) FIFO allocation across 3 BUs verified with ₹10000 total outstanding, (3) Partial payment ₹1500 correctly allocated, (4) Cascade payment ₹4000 correctly allocated across 3 invoices, (5) Overpayment ₹10000 with ₹5500 advance working, (6) All invoice statuses updated correctly to 'paid', (7) Dashboard outstanding field working, (8) Customer details endpoint returns complete data structure, (9) Finance transactions created for all payments, (10) No regression - new sales and PDF generation still working. Payment workflow is production-ready."
+    -message: "✅ ALL BACKEND TESTS PASSED (17/17). Comprehensive testing completed for: A) Customer ledger & statement (ledger with/without date filters, PDF generation, print HTML, share URLs), B) Reports (sales/purchases/payments/stock/bu-summary with filters, Excel export), C) Dashboard widgets (top customers by outstanding/revenue, recent payments/sales), D) No regression (payment creation, feed sale creation, invoice PDF generation all working). All endpoints return correct data structures, proper Content-Types, valid PDFs/Excel files. No regressions detected in existing flows. Backend implementation is production-ready."
