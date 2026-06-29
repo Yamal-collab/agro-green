@@ -4,18 +4,11 @@ import { useQuery } from "@tanstack/react-query";
 import api from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
 import KpiCard from "@/components/KpiCard";
-import { Wheat, Egg, Bird, Droplets, AlertTriangle, TrendingUp, Banknote } from "lucide-react";
+import { AlertTriangle, TrendingUp, Banknote } from "lucide-react";
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 
 const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
 const AXIS = { fontSize: 11 };
-
-const BU_META = [
-  { key: "bu1", label: "Feed Trading", icon: Wheat, color: "#14532D", extraKey: "stock_value", extraLabel: "Stock Value", extraFmt: currency },
-  { key: "bu2", label: "Egg Hatchery", icon: Egg, color: "#CA8A04", extraKey: "active_batches", extraLabel: "Active Batches", extraFmt: (n) => n },
-  { key: "bu3", label: "Own Farm", icon: Bird, color: "#15803D", extraKey: "current_birds", extraLabel: "Current Birds", extraFmt: (n) => n },
-  { key: "bu4", label: "Water", icon: Droplets, color: "#0284C7", extraKey: "water_stock", extraLabel: "Water Stock (L)", extraFmt: (n) => Number(n).toLocaleString() },
-];
 
 export default function Dashboard() {
   const { data, isLoading } = useQuery({ queryKey: ["dashboard"], queryFn: async () => (await api.get("/dashboard/summary")).data });
@@ -28,27 +21,6 @@ export default function Dashboard() {
   return (
     <div data-testid="dashboard-page">
       <PageHeader title="Dashboard" subtitle="Combined view across all four business units" />
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {BU_META.map(({ key, label, icon: Icon, color, extraKey, extraLabel, extraFmt }) => {
-          const bu = data[key] || {};
-          return (
-            <div key={key} className="bg-white border border-border rounded-lg p-5" data-testid={`bu-card-${key}`}>
-              <div className="flex items-center gap-2 mb-3">
-                <Icon className="h-5 w-5" style={{ color }} />
-                <div className="font-bold" style={{ fontFamily: "var(--font-heading)", color }}>{label}</div>
-              </div>
-              <div className="text-2xl font-bold mb-1" style={{ color, fontFamily: "var(--font-heading)" }}>{currency(bu.profit)}</div>
-              <div className="text-xs text-muted-foreground mb-2">Net Profit (mo)</div>
-              <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-border">
-                <div><span className="text-muted-foreground">Revenue:</span> <span className="font-semibold">{currency(bu.revenue)}</span></div>
-                <div><span className="text-muted-foreground">Expense:</span> <span className="font-semibold">{currency(bu.expense)}</span></div>
-                <div className="col-span-2"><span className="text-muted-foreground">{extraLabel}:</span> <span className="font-semibold">{extraFmt(bu[extraKey])}</span></div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <KpiCard testid="kpi-today" label="Today's Sales" value={currency(data.today_total_sales)} />
