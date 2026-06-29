@@ -1,15 +1,22 @@
 import React, { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import api, { formatApiError } from "@/lib/api";
 import PageHeader from "@/components/PageHeader";
-import { Plus, X, Search } from "lucide-react";
+import { Plus, X, Search, Eye } from "lucide-react";
 
 const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
+const BU_LABEL = { 1: "Feed", 2: "Hatchery", 3: "Farm", 4: "Water" };
+const statusBadge = (s) =>
+  s === "paid" ? "bg-[#15803D]/10 text-[#15803D]"
+  : s === "partial" ? "bg-[#CA8A04]/10 text-[#CA8A04]"
+  : "bg-[#C2410C]/10 text-[#C2410C]";
 
 const empty = { name: "", business_name: "", phone: "", email: "", address: "", gst: "", credit_limit: 0, payment_terms: "Net 30", status: "active" };
 
 export default function Customers() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(empty);
   const [search, setSearch] = useState("");
@@ -66,25 +73,36 @@ export default function Customers() {
               <th className="text-left py-3">Business</th>
               <th className="text-left py-3">Phone</th>
               <th className="text-right py-3">Credit Limit</th>
-              <th className="text-right py-3 px-4">Outstanding</th>
+              <th className="text-right py-3">Outstanding</th>
+              <th className="text-center py-3 px-4">Details</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map((c) => (
               <tr key={c.id} className="border-t border-border hover:bg-background/60" data-testid={`customer-row-${c.id}`}>
-                <td className="py-3 px-4 font-semibold">{c.name}</td>
-                <td className="text-muted-foreground">{c.business_name || "—"}</td>
+                <td className="py-3 px-4 font-semibold">
+                  <Link to={`/customers/${c.id}`} className="text-primary hover:underline" data-testid={`customer-link-${c.id}`}>{c.name}</Link>
+                </td>
+                <td className="text-muted-foreground">{c.business_name || c.farm_name || "—"}</td>
                 <td className="font-mono text-xs">{c.phone || "—"}</td>
                 <td className="text-right">{currency(c.credit_limit)}</td>
-                <td className="text-right px-4">
+                <td className="text-right">
                   <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
                     c.outstanding > 0 ? "bg-[#C2410C]/10 text-[#C2410C]" : "bg-secondary text-primary"
                   }`}>{currency(c.outstanding)}</span>
                 </td>
+                <td className="text-center px-4">
+                  <button
+                    data-testid={`customer-details-${c.id}`}
+                    onClick={() => navigate(`/customers/${c.id}`)}
+                    className="p-1.5 rounded hover:bg-secondary text-primary"
+                    title="View account, invoices and statement"
+                  ><Eye className="h-4 w-4" /></button>
+                </td>
               </tr>
             ))}
             {filtered.length === 0 && (
-              <tr><td colSpan={5} className="py-12 text-center text-sm text-muted-foreground">No customers found</td></tr>
+              <tr><td colSpan={6} className="py-12 text-center text-sm text-muted-foreground">No customers found</td></tr>
             )}
           </tbody>
         </table>
